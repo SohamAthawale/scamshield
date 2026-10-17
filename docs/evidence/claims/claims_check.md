@@ -1,0 +1,30 @@
+# Claims check (z17 VM, deployed models and value-aware policy)
+
+## 1. How concentrated is the laundered money paused? (test days)
+
+468 laundering payments paused, $269.2M in total.
+
+| Largest paused payments | Share of the money paused |
+|---|---|
+| top 1 | 29.6% |
+| top 5 | 73.1% |
+| top 10 | 95.0% |
+| top 20 | 98.2% |
+| top 50 | 98.5% |
+
+| Share of the money | Payments needed |
+|---|---|
+| 50% | 3 |
+| 80% | 7 |
+| 90% | 9 |
+
+Largest single payment $79.7M; median paused laundering payment $11,266. By format: ACH 100.0%.
+
+## 2. Measured mitigation: an ACH-only warning threshold (cap chosen on validation, test scored once)
+
+| Honest-ACH cap (val) | ACH warn threshold | ACH false alarms (test) | All honest false alarms | Worst/best format | Smallest banks (<100) | Laundering warned or paused | ACH laundering warned or paused |
+|---|---|---|---|---|---|---|---|
+| today | 0.128 | 10.4% | 1.65% | 113x | 2.6% | 82.0% | 93.8% |
+| 8% | 0.142 | 9.6% | 1.54% | 104x | 2.2% | 81.6% | 93.3% |
+| 6% | 0.209 | 6.9% | 1.16% | 75x | 1.2% | 79.2% | 90.5% |
+| 4% | 0.316 | 4.5% | 0.84% | 49x | 0.7% | 76.0% | 86.9% |

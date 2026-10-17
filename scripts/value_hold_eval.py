@@ -54,6 +54,27 @@ def table(old: dict, new: dict, total_usd: float) -> str:
     return "\n".join(lines)
 
 
+def score_everything(raw: Path, art: Artifacts):
+    """Every payment scored exactly as training did, with the DEPLOYED models (no retraining)."""
+    import torch
+
+    t0 = time.time()
+    ctx = FeatureContext.from_json(art.feature_context.read_text())
+    tx = D.load_transactions(str(raw))
+    split = D.time_split(tx["ts"])
+    X = FeatureEngine(ctx).run(tx)
+    log.info("features for %d payments in %.0fs", len(tx), time.time() - t0)
+    y = tx["label"].values.astype(int)
+    usd = tx["amount_paid"].values * tx["currency_paid"].map(ctx.usd_per_unit).values
+    booster = xgb.Booster()
+    booster.load_model(str(art.risk_model))
+    risk = booster.inplace_predict(X).astype(np.float64)
+    ae = build_torch_autoencoder(len(ANOMALY_FEATURES))
+    ae.load_state_dict(torch.load(art.ae_torch, map_location="cpu"))
+    anomaly = reconstruction_errors(ae.eval(), Standardizer.load(art.scaler), X)
+    return tx, split, y, usd, risk, anomaly, rule_matrix(X, ctx)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--raw", type=Path, default=Path("aml"))
@@ -68,21 +89,7 @@ def main() -> None:
     t0 = time.time()
     a.out.mkdir(parents=True, exist_ok=True)
     art = Artifacts(a.models)
-    ctx = FeatureContext.from_json(art.feature_context.read_text())
-    tx = D.load_transactions(str(a.raw))
-    split = D.time_split(tx["ts"])
-    X = FeatureEngine(ctx).run(tx)
-    log.info("features for %d payments in %.0fs", len(tx), time.time() - t0)
-    y = tx["label"].values.astype(int)
-    usd = tx["amount_paid"].values * tx["currency_paid"].map(ctx.usd_per_unit).values
-
-    booster = xgb.Booster()
-    booster.load_model(str(art.risk_model))
-    risk = booster.inplace_predict(X).astype(np.float64)
-    ae = build_torch_autoencoder(len(ANOMALY_FEATURES))
-    ae.load_state_dict(torch.load(art.ae_torch, map_location="cpu"))
-    anomaly = reconstruction_errors(ae.eval(), Standardizer.load(art.scaler), X)
-    rules = rule_matrix(X, ctx)
+    tx, split, y, usd, risk, anomaly, rules = score_everything(a.raw, art)
 
     th = json.loads(art.thresholds.read_text())
     old = Policy(th["anomaly_threshold"], th["warn_threshold"], th["hold_threshold"])

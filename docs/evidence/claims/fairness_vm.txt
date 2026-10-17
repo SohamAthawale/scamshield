@@ -1,0 +1,41 @@
+# fairness.py on ~/shared/scamshield/data/test_decisions.csv (VM training run; warned-or-held is identical under the plain and value-aware hold), Sat Oct 17 12:21:04 PM UTC 2026, s390x, Type:                 9175
+overall honest false-alarm rate 0.01648
+
+                   payments  false_alarm_rate  false_hold_rate  laundering_caught  vs_overall
+currency_paid                                                                                
+US Dollar            322621            0.0165           0.0006             0.8261      1.0039
+Euro                 198231            0.0156           0.0005             0.8118      0.9493
+Swiss Franc           39678            0.0165           0.0005             0.7407      0.9994
+Yuan                  36201            0.0175           0.0007             0.9355      1.0637
+Shekel                32752            0.0178           0.0005             0.8235      1.0826
+Rupee                 32200            0.0179           0.0005             0.8500      1.0862
+UK Pound              30922            0.0177           0.0004             0.5652      1.0723
+Ruble                 26513            0.0163           0.0003             0.8182      0.9919
+Yen                   26289            0.0188           0.0006             0.8750      1.1394
+Bitcoin               24327            0.0032           0.0000             0.1000      0.1947
+Canadian Dollar       23893            0.0177           0.0006             0.8667      1.0725
+Australian Dollar     23220            0.0194           0.0004             0.8889      1.1800
+Mexican Peso          18563            0.0170           0.0005             0.7273      1.0310
+Saudi Riyal           15175            0.0205           0.0001             0.9103      1.2461
+Brazil Real           12207            0.0229           0.0005             1.0000      1.3880
+
+                payments  false_alarm_rate  false_hold_rate  laundering_caught  vs_overall
+payment_format                                                                            
+Cheque            347008            0.0009           0.0000             0.0167      0.0560
+Credit Card       250247            0.0038           0.0000             0.0000      0.2306
+ACH               119195            0.1041           0.0037             0.9376      6.3170
+Cash               91737            0.0032           0.0000             0.0000      0.1972
+Wire               30276            0.0081           0.0000                NaN      0.4891
+Bitcoin            24329            0.0028           0.0000             0.1000      0.1697
+
+           payments  false_alarm_rate  false_hold_rate  laundering_caught  vs_overall
+bank_size                                                                            
+1k-10k       392221            0.0130           0.0004             0.9178      0.7876
+100-1k       257123            0.0223           0.0008             0.9317      1.3543
+10k+         113823            0.0074           0.0002             0.2566      0.4500
+<100          99625            0.0255           0.0006             0.9452      1.5501
+
+        attribute  groups  min_false_alarm  max_false_alarm  max_over_min  worst_group best_group
+0   currency_paid      15           0.0032           0.0229        7.1307  Brazil Real    Bitcoin
+1  payment_format       6           0.0009           0.1041      112.8630          ACH     Cheque
+2       bank_size       4           0.0074           0.0255        3.4444         <100       10k+

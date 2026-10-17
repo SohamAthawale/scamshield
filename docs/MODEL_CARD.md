@@ -1,6 +1,6 @@
 # Model card: ScamShield
 
-All numbers come from the training run on the IBM z17 VM (`docs/evidence/training/metrics_vm.json`), the hold-policy evaluation on the same VM with the same models (`docs/evidence/value_hold/`), the live replays (`docs/evidence/replay/`) and the notebooks executed on the VM (`notebooks/`).
+All numbers come from the training run on the IBM z17 VM (`docs/evidence/training/metrics_vm.json`), the hold-policy evaluation on the same VM with the same models (`docs/evidence/value_hold/`), the claims checks (`docs/evidence/claims/`), the live replays (`docs/evidence/replay/`) and the notebooks executed on the VM (`notebooks/`).
 
 ## What it is for
 
@@ -99,6 +99,8 @@ Thresholds were tuned on **validation days only**:
 
 The trade: 295 fewer call-backs. Honest customers paused fall from 437 to 173, so 6 in 10 of them get a warning instead. The cost is 31 fewer laundering payments paused and 3 schemes no longer broken (one fan-out, one random, one scatter-gather). Almost all laundered money sits in large payments, so the money paused barely moves. The validation target was 80% precision; on test it is 73%, so the target did not fully carry over. Every payment the value-aware policy stops pausing is warned instead, so "warned or paused" figures, the injected-payment totals and the fairness false-alarm rates below are the same under both policies.
 
+**How concentrated is the money paused?** (`docs/evidence/claims/claims_check.md`) Very: of the 468 laundering payments paused on the test days, the largest one is $79.7M (30% of the $269M), the top 5 are 73% and the top 10 are 95%; the median is $11,266, and all of it is ACH. The dollar figure is true but rests on about ten transfers, so precision and schemes broken are the steadier measures.
+
 Schemes broken on test, by pattern:
 
 | Pattern | Broken |
@@ -128,21 +130,32 @@ Schemes broken on test, by pattern:
 
 **Offline, 290 of each kind** (`docs/evidence/replay/victim_vs_honest_offline.md`): victims, honest payees with history and brand-new accounts all get the **same** mix, about 32% paused, 64% warned and 4–6% allowed (plain hold threshold; the allowed share is the same under the value-aware hold).
 
-## Fairness (`notebooks/03_fairness.ipynb`)
+## Fairness
 
-There are no demographics in this data. We audit the false-alarm rate (honest payments warned or held) by proxies:
+There are no demographics in this data. We audit the false-alarm rate (honest payments warned or held) by proxies, with `src/scamshield/fairness.py` on the VM's test decisions (`docs/evidence/claims/fairness_vm.txt`; the same code as `notebooks/03_fairness.ipynb`). Warned-or-held is the same under the plain and the value-aware hold, so these rates hold for both. The overall rate is 1.65%.
 
 - **Currency (a proxy for migrant communities):**
   - all fiat currencies sit at 1.6–2.3%;
-  - Brazil Real is 1.31× the overall rate, Saudi Riyal 1.24×, Rupee 1.13×, Yuan 1.09×;
-  - Bitcoin is 0.17×.
+  - Brazil Real is 1.39× the overall rate, Saudi Riyal 1.25×, Australian Dollar 1.18×, Yen 1.14×;
+  - Bitcoin is 0.19×.
   - So no currency group is singled out, though the spread deserves monitoring.
 - **Payment format:**
-  - **honest ACH payments are warned 11.1% of the time** (6.4× overall), because most laundering moves by ACH;
-  - cheque, card and cash sit at 0.1–0.4%.
-- **Bank size:**
-  - customers of the smallest banks (<100 payments in the test days) see 3.2% false alarms;
-  - customers of the biggest banks see 0.65% (5×).
+  - **honest ACH payments are warned or held 10.4% of the time** (6.3× overall), because most laundering moves by ACH;
+  - cheque, card, cash and Bitcoin sit at 0.1–0.4%, wire 0.8%.
+- **Bank size** (payments by the sender's bank in the test days):
+  - customers of the smallest banks (<100) see 2.6% false alarms;
+  - customers of the biggest banks (10k+) see 0.74% (3.4×).
+
+**A measured mitigation** (`scripts/claims_check.py`, `docs/evidence/claims/claims_check.md`): give ACH its own warning threshold, chosen on **validation days** to cap the honest-ACH false-alarm rate, then score the test days once per cap. Holds don't change.
+
+| Honest-ACH cap (validation) | ACH warn threshold | ACH false alarms (test) | All honest false alarms | Smallest banks | Laundering warned or paused | ACH laundering warned or paused |
+|---|---|---|---|---|---|---|
+| none (deployed) | 0.128 | 10.4% | 1.65% | 2.6% | 82.0% | 93.8% |
+| 8% | 0.142 | 9.6% | 1.54% | 2.2% | 81.6% | 93.3% |
+| 6% | 0.209 | 6.9% | 1.16% | 1.2% | 79.2% | 90.5% |
+| 4% | 0.316 | 4.5% | 0.84% | 0.7% | 76.0% | 86.9% |
+
+The 6% cap removes about a third of honest-ACH friction and halves it for small-bank customers, for 2.8 points of laundering warned or paused. It isn't deployed: how much friction to trade for coverage is the bank's call, and the table puts a number on it.
 
 **Mitigations in place:**
 - warnings never block;
@@ -150,9 +163,8 @@ There are no demographics in this data. We audit the false-alarm rate (honest pa
 - every decision carries its reasons.
 
 **Next steps:**
-- per-segment warning budgets (by format and bank size);
-- re-measuring with the notebook;
-- adding fairness to the release checklist.
+- choose a per-format cap with the bank, then bank-size budgets the same way;
+- add fairness to the release checklist.
 
 ## Limitations
 
@@ -160,6 +172,9 @@ There are no demographics in this data. We audit the false-alarm rate (honest pa
 - **The victim side can't be separated from honest unusual payments in this data,** because receiver history doesn't distinguish the mule accounts. Real deployments would add evidence the dataset lacks: Confirmation of Payee mismatches, mule reports shared between banks (e.g. AFCX), and account age.
 - **About 87% of laundering is ACH.** Laundering by cash, cheque or card is mostly missed.
 - **The rolling state is built from 8 days of history.** Real use needs months, and recalibration and drift monitoring.
+- **The evaluation is short:** thresholds tuned on 2 validation days, tested on 2. Hold precision fell from validation to test under both hold policies (60% → 53% plain, 81.5% → 73% value-aware).
+- **The dollar figure rests on about ten transfers** (95% of the $269M paused).
+- **The Telum II speeds up the model, not yet the service.** Bulk files run the customer model on the NNPA (40,960 of 40,960 payments in a VM replay), but end to end there is no measurable gain (median 1,562 vs 1,610 payments/s, `docs/evidence/bench/bulk_file_nnpa_vs_cpu.txt`). Single payments stay on the CPU, where small batches are faster.
 - **Granite (2B, Q8_0) takes about 1–2 minutes per note on 3 vCPUs.** The template message, built from the same facts, is instant.
 
 ## Granite

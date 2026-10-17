@@ -1,0 +1,7 @@
+INFO scamshield.api ready: anomaly=torch_cpu risk=xgboos
+offset=200000 2212.7 pay/s; server p50 757.11 ms/file; backend {'torch_cpu': 40960} {'ALLOW': 40363, 'WARN': 581, 'HOLD': 16}
+offset=250000 2070.8 pay/s; server p50 826.47 ms/file; backend {'torch_cpu': 40960} {'ALLOW': 40362, 'WARN': 577, 'HOLD': 21}
+INFO scamshield.api ready: anomaly=torch_nnpa risk=xgboo
+offset=300000 1437.4 pay/s; server p50 1286.25 ms/file; backend {'torch_nnpa': 40960} {'ALLOW': 40306, 'WARN': 621, 'HOLD': 33}
+offset=350000 1526.3 pay/s; server p50 1125.7 ms/file; backend {'torch_nnpa': 40960} {'ALLOW': 40386, 'WARN': 544, 'HOLD': 30}
+INFO scamshield.api ready: anomaly=torch_nnpa risk=xgboo

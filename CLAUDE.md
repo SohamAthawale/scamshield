@@ -50,6 +50,7 @@ Done:
 - [x] API (micro-batching, SSE, RBAC customer/analyst/auditor/service), encrypted store, audit chain with anchor, history bootstrap (4.2M payments, 61 s)
 - [x] Granite worker (customer messages + analyst briefs), dashboard, simulator with injected victim/honest payments
 - [x] NNPA vs CPU benchmark (1.2x at 1,024, 1.4x at 4,096), notebooks 01-03 executed on LinuxONE, fairness audit
+- [x] Bulk payment files (`POST /payments/batch`) put the model on the NNPA in the live service (40,960/40,960); no measurable end-to-end gain (docs/evidence/bench/bulk_file_nnpa_vs_cpu.txt). Claims checks: $269M paused is 95% ten transfers; measured ACH warn-cap mitigation (docs/evidence/claims/)
 - [x] README, MODEL_CARD, SECURITY, ENV_REPORT, DEMO_SCRIPT
 
 Still to do (people, not code):

@@ -1,0 +1,18 @@
+# bulk-file replay (40,960 payments per run, files of 2,048), Granite stopped, CPU and NNPA alternated; Sat Oct 17 12:02:59 PM UTC 2026
+scamshield-api-1 
+cpu offset=400000 1388.7 pay/s; server p50 1272.63 ms/file; backend {'torch_cpu': 40960}
+nnpa offset=450000 1561.9 pay/s; server p50 1124.69 ms/file; backend {'torch_nnpa': 40960}
+cpu offset=500000 1683.6 pay/s; server p50 1032.13 ms/file; backend {'torch_cpu': 40960}
+nnpa offset=550000 1747.7 pay/s; server p50 1014.76 ms/file; backend {'torch_nnpa': 40960}
+cpu offset=600000 1609.6 pay/s; server p50 1103.07 ms/file; backend {'torch_cpu': 40960}
+nnpa offset=650000 1155.5 pay/s; server p50 1624.9 ms/file; backend {'torch_nnpa': 40960}
+scamshield-api-1 Up 2 minutes (healthy);scamshield-granite-1 Up Less than a second;
+INFO scamshield.api ready: anomaly=torch_nnpa risk=xgboo
+
+# Reading: every payment in a bulk file is scored on the Telum II NNPA (backend counts above), but end to end
+# there is no measurable difference: CPU median 1,610 payments/s, NNPA median 1,562, with ±20% run-to-run noise.
+# The customer-anomaly model is a small slice of each payment's cost (streaming features in Python, XGBoost,
+# AES-GCM sealing, SQLite, HTTP/JSON). Model-only, NNPA is 1.2x faster at 1,024 and 1.4x at 4,096
+# (bench_autoencoder.csv). An earlier un-alternated attempt is in bulk_file_nnpa_vs_cpu_raw.txt: there the
+# Granite worker's growing note backlog slowed each run in turn, and its first "CPU" pair actually ran on NNPA
+# because `docker compose run` recreated the api; it is kept only as a record of why the method changed.
