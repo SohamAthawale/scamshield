@@ -116,12 +116,10 @@ Tests: `PYTHONPATH=src python -m pytest -q tests`.
 
 ## Team
 
-| Role | Name |
+| Name | Role and contributions |
 |---|---|
-| Lead and infra (VM, containers, benchmarks) | _fill in_ |
-| ML (features, models, fairness) | _fill in_ |
-| Backend and security (API, crypto, RBAC, audit) | _fill in_ |
-| UI and pitch (dashboard, video, slides) | _fill in_ |
+| Soham Athawale | Team lead · _fill in what you built_ |
+| Vaishnavi Joshi | _fill in what Vaishnavi built_ |
 
 All solution code was written during the IBM Z Datathon 2026 (Oct 17–18). It uses public data and open-source libraries only, and none of the reference lab notebooks' code.
 
