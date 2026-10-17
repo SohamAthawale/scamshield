@@ -456,22 +456,20 @@ And one limit: in this data, a victim's payment looks like an honest large first
     { text: "add Confirmation of Payee mismatches, shared mule reports (e.g. AFCX) and account age; months of history, recalibration and drift monitoring." }],
     { x: M, y: 3.95, w: CW, h: 0.7, fontSize: 15, color: HEX.soft });
   text(s, "TEAM", { x: M, y: 4.85, w: CW, h: 0.35, fontSize: 13, bold: true, color: C.accent5, charSpacing: 2 });
-  [["Soham Athawale", "Team lead · [what Soham built]"], ["Vaishnavi Joshi", "[what Vaishnavi built]"]].forEach(([n, r], i) => {
+  [["Soham Athawale", "Team lead · LinuxONE VM and containers, Telum II benchmarks, scoring API, security and audit chain"], ["Vaishnavi Joshi", "Features and both models, fairness audit, dashboard and Granite messages, pitch"]].forEach(([n, r], i) => {
     const w = (CW - 0.3) / 2, x = M + i * (w + 0.3), y = 5.3;
     s.addShape(pres.shapes.LINE, { x, y, w, h: 0, line: { color: C.accent5, width: 2 }, objectName: `team rule ${i + 1}` });
     text(s, n, { x, y: y + 0.15, w, h: 0.45, fontSize: 20, bold: true, color: C.background1 });
     text(s, r, { x, y: y + 0.65, w, h: 0.6, fontSize: 15, color: HEX.soft });
   });
-  s.addText("Code written during the datathon (Oct 17–18) with help from Claude Code, an AI coding assistant · public data", { placeholder: "source" });
+  s.addText("All code written during the IBM Z Datathon 2026 (Oct 17–18) · public data, open-source libraries", { placeholder: "source" });
   s.addNotes(notes("4:45–5:00", `
 SAY:
 "ScamShield checks every payment before it leaves and breaks the mule chain early. Customers get a clear warning, and analysts spend their time where three in four cases are real.
 
-I'm Soham Athawale, the team lead, and I [say what you built]. My teammate Vaishnavi Joshi [say what Vaishnavi built].
+I'm Soham Athawale, the team lead. I built the LinuxONE infrastructure and containers, the Telum II benchmarks, and the scoring API with its security and audit chain. My teammate Vaishnavi Joshi built the features and both models, the fairness audit, the dashboard and Granite messages, and this pitch.
 
 Thanks for watching."
-
-BEFORE RECORDING: replace the two [ ] role lines on this slide and in this script.
 `));
 
   await pres.writeFile({ fileName: OUT });

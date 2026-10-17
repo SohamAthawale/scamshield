@@ -118,8 +118,8 @@ Tests: `PYTHONPATH=src python -m pytest -q tests`.
 
 | Name | Role and contributions |
 |---|---|
-| Soham Athawale | Team lead · _fill in what you built_ |
-| Vaishnavi Joshi | _fill in what Vaishnavi built_ |
+| Soham Athawale | Team lead · LinuxONE VM and containers, Telum II benchmarks, scoring API, security and audit chain |
+| Vaishnavi Joshi | Features and both models, fairness audit, dashboard and Granite messages, pitch |
 
 All solution code was written during the IBM Z Datathon 2026 (Oct 17–18). It uses public data and open-source libraries only, and none of the reference lab notebooks' code.
 
