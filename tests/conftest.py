@@ -223,3 +223,119 @@ def assert_close(a, b, atol=1e-9, rtol=1e-9):
 
 def isclose(a: float, b: float, tol: float = 1e-9) -> bool:
     return math.isclose(a, b, rel_tol=tol, abs_tol=tol)
+
+
+# ------------------------------------------------------------------------------- API environment
+BENE_HEADER = (["BeneID", "DOB", "DOD", "Gender", "Race", "RenalDiseaseIndicator", "State", "County",
+                "NoOfMonths_PartACov", "NoOfMonths_PartBCov", *CHRONIC_COLS,
+                "IPAnnualReimbursementAmt", "IPAnnualDeductibleAmt", "OPAnnualReimbursementAmt",
+                "OPAnnualDeductibleAmt"])
+# BENE11002 died on 2009-06-01; everyone else is alive. BENE11001..BENE11010 have 12/12 months of cover;
+# two extra beneficiaries have none: BENE11011 no Part A (inpatient), BENE11012 no Part B (outpatient)
+DECEASED = {"BENE11002": "2009-06-01"}
+NO_COVER = {"BENE11011": "A", "BENE11012": "B"}
+N_BENES = 10
+DEMO_USERS = {
+    "inv": {"role": "investigator"},
+    "aud": {"role": "auditor"},
+    "prv1": {"role": "provider", "provider_id": "PRV51001"},
+    "prv2": {"role": "provider", "provider_id": "PRV51002"},
+}
+# only rules flag a claim (anomaly threshold is huge); any ready provider is "risky" (threshold 0), so a
+# rule-breaking claim is RETURN while its provider has < 3 claims and HOLD from the 3rd claim on
+DEFAULT_POLICY = {"anomaly_threshold": 1e9, "provider_threshold": 0.0, "min_provider_claims": 3}
+
+
+def write_bene_csv(path: Path, n: int = N_BENES, deceased: dict | None = None, no_cover: dict | None = None) -> None:
+    deceased = DECEASED if deceased is None else deceased
+    no_cover = NO_COVER if no_cover is None else no_cover
+    lines = [",".join(f'"{h}"' for h in BENE_HEADER)]
+    ids = [f"BENE{11001 + i}" for i in range(n)] + list(no_cover)
+    for i, bid in enumerate(ids):
+        renal = '"Y"' if i % 3 == 0 else '"0"'
+        dod = deceased.get(bid, "NA")
+        chronic = [str(1 if (i + j) % 2 else 2) for j in range(len(CHRONIC_COLS))]
+        part_a = "0" if no_cover.get(bid) == "A" else "12"
+        part_b = "0" if no_cover.get(bid) == "B" else "12"
+        lines.append(",".join([f'"{bid}"', f"19{30 + i % 60}-0{1 + i % 9}-01", dod, "1", "1", renal, "39", "230",
+                               part_a, part_b, *chronic, "0", "0", "0", "0"]))
+    path.write_text("\n".join(lines) + "\n")
+
+
+def claim_json(claim_id: str, provider: str = "PRV51001", bene: str = "BENE11001", start: str = "2009-03-01",
+               end: str | None = "2009-03-03", amount: float = 500.0, attending: str | None = "PHY300001",
+               dx: str = "4019", inpatient: int = 0, **over) -> dict:
+    c = {"ClaimID": claim_id, "BeneID": bene, "Provider": provider, "ClaimStartDt": start, "ClaimEndDt": end,
+         "AdmissionDt": None, "DischargeDt": None, "InscClaimAmtReimbursed": amount, "DeductibleAmtPaid": 0.0,
+         "AttendingPhysician": attending, "OperatingPhysician": None, "OtherPhysician": None,
+         "ClmAdmitDiagnosisCode": dx, "DiagnosisGroupCode": None, "ClmDiagnosisCode_1": dx,
+         "ClmProcedureCode_1": None, "is_inpatient": inpatient}
+    c.update(over)
+    return c
+
+
+class ApiEnv:
+    """Everything create_app needs, under one tmp dir. `settings(...)` builds a Settings pointing at it."""
+
+    def __init__(self, root: Path, models_src: Path):
+        import shutil
+
+        from claimsense.security import generate_secrets, read_secret
+
+        self.root = root
+        self.models = root / "models"
+        shutil.copytree(models_src, self.models)
+        self.raw = root / "raw"
+        self.raw.mkdir()
+        write_bene_csv(self.raw / "Train_Beneficiarydata-1.csv")
+        self.secrets = root / "secrets"
+        self.passwords = generate_secrets(self.secrets, DEMO_USERS)
+        self.service_token = read_secret("service_token", self.secrets)
+        self.policy = root / "policy.json"
+        self.set_policy(DEFAULT_POLICY)
+        self.db = root / "data" / "claimsense.db"
+        self.checkpoints = root / "data" / "audit_checkpoints.log"
+
+    def set_policy(self, policy: dict) -> None:
+        self.policy.write_text(json.dumps(policy))
+
+    def settings(self, **over):
+        from claimsense.api.settings import Settings
+
+        kw = dict(models_dir=self.models, policy_file=self.policy, raw_dir=self.raw, db_path=self.db,
+                  checkpoint_path=self.checkpoints, secrets_dir=self.secrets, anomaly_backend="numpy",
+                  nnpa_min_batch=256, batch_window_ms=2.0, max_batch=512, jwt_ttl_minutes=60)
+        kw.update(over)
+        return Settings(**kw)
+
+    def client(self, **settings_over):
+        from fastapi.testclient import TestClient
+
+        from claimsense.api.main import create_app
+
+        return TestClient(create_app(self.settings(**settings_over)))
+
+    def envelope(self):
+        from claimsense.security import load_keyring
+
+        return load_keyring(self.secrets)
+
+    def pseudo(self):
+        from claimsense.security import Pseudonymizer, read_secret
+
+        return Pseudonymizer(bytes.fromhex(read_secret("pseudo_key", self.secrets)))
+
+
+@pytest.fixture
+def api_env(tmp_path, tiny_models_dir) -> ApiEnv:
+    return ApiEnv(tmp_path / "api", tiny_models_dir)
+
+
+def login(client, user: str, env: ApiEnv) -> dict:
+    r = client.post("/auth/login", json={"username": user, "password": env.passwords[user]})
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+def service_headers(env: ApiEnv) -> dict:
+    return {"Authorization": f"Bearer {env.service_token}"}

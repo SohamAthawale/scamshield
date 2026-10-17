@@ -153,8 +153,12 @@ def test_reasons_present_for_every_non_pay_decision(make_engine, claims):
         assert "rules" in res.reasons
         assert res.reasons["rules"] or res.reasons.get("claim"), "non-PAY decision with no claim-level reason"
         if d.anomaly_flag:
-            assert len(res.reasons["claim"]) == 3
-            assert all(c["feature"] in CLAIM_FEATURES for c in res.reasons["claim"])
+            claim = res.reasons["claim"]
+            assert 1 <= len(claim) <= 3
+            assert all(c["feature"] in CLAIM_FEATURES for c in claim)
+            assert all(c["share_of_anomaly"] >= 0.10 for c in claim[1:])      # min_share; top one always kept
+            shares = [c["share_of_anomaly"] for c in claim]
+            assert shares == sorted(shares, reverse=True)
         else:
             assert "claim" not in res.reasons
         assert [r["rule"] for r in res.reasons["rules"]] == d.hard_errors

@@ -71,6 +71,10 @@ HARD_RULES: dict[str, tuple[str, str]] = {
         "No attending physician on the claim",
         "Add the attending physician's identifier.",
     ),
+    "no_coverage": (
+        "Patient has no coverage on record for this type of service (Part A for inpatient, Part B for outpatient)",
+        "Check the patient's eligibility and identifier, or bill the correct payer.",
+    ),
     "duplicate": (
         "Looks like a duplicate of a claim already submitted",
         "Check whether this service was already billed; withdraw it if so.",
@@ -297,6 +301,10 @@ def hard_errors(claim: Mapping[str, Any], bene: Mapping[str, Any]) -> list[str]:
         out.append("discharge_before_admission")
     if not _present(claim.get("AttendingPhysician")):
         out.append("missing_attending")
+    inp = int(_num(claim.get("is_inpatient")))
+    months = bene.get("NoOfMonths_PartACov") if inp else bene.get("NoOfMonths_PartBCov")
+    if _present(months) and _num(months) <= 0:
+        out.append("no_coverage")
     return out
 
 
@@ -313,6 +321,10 @@ def hard_errors_batch(claims: pd.DataFrame) -> pd.DataFrame:
             "end_before_start": (end < start).fillna(False),
             "discharge_before_admission": (dis < adm).fillna(False),
             "missing_attending": ~c["AttendingPhysician"].map(_present),
+            "no_coverage": pd.Series(np.where(c["is_inpatient"].astype(int) == 1,
+                                              pd.to_numeric(c["NoOfMonths_PartACov"], errors="coerce"),
+                                              pd.to_numeric(c["NoOfMonths_PartBCov"], errors="coerce")),
+                                     index=c.index).le(0),  # missing months -> no fire, like the stream
             "duplicate": c.duplicated(dup_cols, keep="first"),
         },
         index=c.index,

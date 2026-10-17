@@ -16,7 +16,7 @@ from claimsense.features import (
 
 from conftest import assert_close, attending_key, bene_fields, make_claims
 
-RULES_NO_DUP = ["after_death", "end_before_start", "discharge_before_admission", "missing_attending"]
+RULES_NO_DUP = ["after_death", "end_before_start", "discharge_before_admission", "missing_attending", "no_coverage"]
 
 
 def stream_features(df, ctx):
@@ -310,7 +310,8 @@ def test_claim_features_all_finite(live_claims, ctx):
     ({"AttendingPhysician": "NA"}, {}, ["missing_attending"]),
     ({"AttendingPhysician": "  "}, {}, ["missing_attending"]),
     ({"ClaimEndDt": "2009-04-01", "DischargeDt": "2009-04-01", "AttendingPhysician": None},
-     {"DOD": "2009-01-01"}, ["after_death", "end_before_start", "discharge_before_admission", "missing_attending"]),
+     {"DOD": "2009-01-01", "NoOfMonths_PartACov": 0},
+     ["after_death", "end_before_start", "discharge_before_admission", "missing_attending", "no_coverage"]),
 ])
 def test_hard_errors_rules(claim_over, bene_over, expected):
     claim, bene = base_claim(**claim_over), base_bene(**bene_over)
@@ -321,6 +322,44 @@ def test_hard_errors_rules(claim_over, bene_over, expected):
     assert all(r in HARD_RULES for r in expected)
 
 
+@pytest.mark.parametrize("inpatient,part_a,part_b,fires", [
+    (1, 0, 12, True),             # inpatient needs Part A
+    (1, 12, 0, False),
+    (0, 12, 0, True),             # outpatient needs Part B
+    (0, 0, 12, False),
+    (1, -1, 12, True),
+    (0, 12, -3, True),
+    (1, 1, 1, False),
+    (0, 0.5, 0.5, False),
+    (1, None, 12, False),         # missing months -> no fire
+    (0, 12, float("nan"), False),
+    (1, float("nan"), 0, False),  # only the relevant part counts, even when it is missing
+])
+def test_no_coverage_rule(inpatient, part_a, part_b, fires):
+    claim = base_claim(is_inpatient=inpatient)
+    if not inpatient:
+        claim.update(AdmissionDt=None, DischargeDt=None)
+    bene = base_bene(NoOfMonths_PartACov=part_a, NoOfMonths_PartBCov=part_b)
+    assert ("no_coverage" in hard_errors(claim, bene)) is fires
+    df = as_frame(claim, bene)
+    for c in ["NoOfMonths_PartACov", "NoOfMonths_PartBCov"]:   # loader-style numeric columns (missing = NaN)
+        df[c] = df[c].astype(float)
+    assert bool(hard_errors_batch(df).iloc[0]["no_coverage"]) is fires
+    assert "no_coverage" in HARD_RULES
+
+
+def test_no_coverage_batch_accepts_none_months_in_object_column():
+    df = as_frame(base_claim(), base_bene(NoOfMonths_PartACov=None))
+    assert df["NoOfMonths_PartACov"].dtype == object
+    assert claim_features_batch(df, FeatureContext())["part_a_months"].iloc[0] == 0.0   # features cope
+    assert not hard_errors_batch(df).iloc[0]["no_coverage"]
+
+
+def test_no_coverage_rule_with_string_months_in_api_dicts():
+    assert "no_coverage" in hard_errors(base_claim(is_inpatient=0), base_bene(NoOfMonths_PartBCov="0"))
+    assert hard_errors(base_claim(is_inpatient=0), base_bene(NoOfMonths_PartBCov="NA")) == []
+
+
 def test_hard_errors_batch_equals_stream(live_claims):
     batch = hard_errors_batch(live_claims)
     assert list(batch.columns) == RULES_NO_DUP + ["duplicate"]
@@ -329,8 +368,19 @@ def test_hard_errors_batch_equals_stream(live_claims):
         expected = hard_errors(r, r)
         assert [k for k in RULES_NO_DUP if batch.iloc[i][k]] == expected
         assert hard_errors(api_style(r), api_style(r)) == expected
-    # the synthetic generator injects every rule at least once
+    # the synthetic generator injects every rule at least once (incl. 0 coverage months)
     assert batch[RULES_NO_DUP].any().all()
+
+
+def test_no_coverage_parity_with_missing_months(live_claims):
+    df = live_claims.copy()
+    df["NoOfMonths_PartACov"] = df["NoOfMonths_PartACov"].astype(float)
+    df.loc[df.index[::7], "NoOfMonths_PartACov"] = float("nan")
+    df.loc[df.index[::5], "NoOfMonths_PartBCov"] = -1
+    batch = hard_errors_batch(df)
+    for i, r in enumerate(df.to_dict("records")):
+        assert ("no_coverage" in hard_errors(r, r)) == bool(batch.iloc[i]["no_coverage"])
+    assert batch["no_coverage"].any() and not batch["no_coverage"].all()
 
 
 def test_duplicate_batch_marks_later_copies_only(live_claims):

@@ -64,15 +64,19 @@ def test_percentile_with_flat_distribution():
     assert percentile(-1, q) == 0.0 and percentile(2, q) == 100.0
 
 
-def test_claim_reasons_picks_largest_errors_with_direction():
+def _errors(pairs):
+    """{feature: (x_std, recon_std)} -> full-length x, r vectors over CLAIM_FEATURES."""
     names = CLAIM_FEATURES
-    x = np.zeros(len(names))
-    r = np.zeros(len(names))
-    i_amt, i_age, i_days = names.index("log_amount"), names.index("age"), names.index("claim_days")
-    x[i_amt], r[i_amt] = 5.0, 0.0     # err 25, higher
-    x[i_age], r[i_age] = -1.0, 2.0    # err 9, lower
-    x[i_days], r[i_days] = 0.0, 1.0   # err 1, lower
-    x[names.index("n_diag")] = 0.1     # err 0.01
+    x, r = np.zeros(len(names)), np.zeros(len(names))
+    for f, (xv, rv) in pairs.items():
+        x[names.index(f)], r[names.index(f)] = xv, rv
+    return names, x, r
+
+
+def test_claim_reasons_picks_largest_errors_with_direction():
+    # errors 25, 9, 4 (+0.01): shares 0.65, 0.23, 0.10x -> all three above min_share
+    names, x, r = _errors({"log_amount": (5.0, 0.0), "age": (-1.0, 2.0), "claim_days": (0.0, 2.0),
+                           "n_diag": (0.1, 0.0)})
     feats = {f: 0.0 for f in names}
     feats["log_amount"] = math.log1p(26000)
     out = claim_reasons(feats, names, x, r, top_k=3)
@@ -80,17 +84,44 @@ def test_claim_reasons_picks_largest_errors_with_direction():
     assert [o["direction"] for o in out] == ["higher than usual", "lower than usual", "lower than usual"]
     assert out[0]["label"] == FEATURE_LABELS["log_amount"]
     assert out[0]["value"] == "$26,000"
-    total = 25 + 9 + 1 + 0.01
+    total = 25 + 9 + 4 + 0.01
     assert out[0]["share_of_anomaly"] == round(25 / total, 3)
     assert sum(o["share_of_anomaly"] for o in out) <= 1.0
     assert len(claim_reasons(feats, names, x, r, top_k=1)) == 1
+
+
+def test_claim_reasons_drops_features_below_min_share():
+    # errors 25, 9, 1: claim_days carries 1/35 < 10% of the error and is dropped
+    names, x, r = _errors({"log_amount": (5.0, 0.0), "age": (-1.0, 2.0), "claim_days": (0.0, 1.0)})
+    feats = {f: 0.0 for f in names}
+    assert [o["feature"] for o in claim_reasons(feats, names, x, r)] == ["log_amount", "age"]
+    assert [o["feature"] for o in claim_reasons(feats, names, x, r, min_share=0.0)] == \
+        ["log_amount", "age", "claim_days"]
+    assert [o["feature"] for o in claim_reasons(feats, names, x, r, min_share=0.5)] == ["log_amount"]
+
+
+def test_claim_reasons_keeps_top_one_even_below_min_share():
+    # 19 features with equal error: each has ~5% share, below 10%, but the top one is always kept
+    names = CLAIM_FEATURES
+    x, r = np.ones(len(names)), np.zeros(len(names))
+    out = claim_reasons({f: 0.0 for f in names}, names, x, r)
+    assert len(out) == 1
+    assert out[0]["share_of_anomaly"] == round(1 / len(names), 3)
+
+
+def test_claim_reasons_min_share_boundary_is_inclusive():
+    # errors 16, 16, 4, 4 (total 40) -> the third reason carries exactly 10%
+    names, x, r = _errors({"log_amount": (4.0, 0.0), "age": (-4.0, 0.0), "claim_days": (2.0, 0.0),
+                           "n_diag": (2.0, 0.0)})
+    out = claim_reasons({f: 0.0 for f in names}, names, x, r)
+    assert len(out) == 3 and out[2]["share_of_anomaly"] == 0.1
 
 
 def test_claim_reasons_zero_error_does_not_divide_by_zero():
     names = CLAIM_FEATURES
     z = np.zeros(len(names))
     out = claim_reasons({f: 0.0 for f in names}, names, z, z)
-    assert len(out) == 3 and all(o["share_of_anomaly"] == 0.0 for o in out)
+    assert len(out) == 1 and out[0]["share_of_anomaly"] == 0.0
 
 
 def test_provider_reasons_only_positive_contributions():

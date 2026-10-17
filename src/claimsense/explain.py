@@ -35,11 +35,15 @@ def display_value(feature: str, v: float) -> str:
 
 
 def claim_reasons(features: Mapping[str, float], feature_names: Sequence[str], x_std: np.ndarray,
-                  recon_std: np.ndarray, top_k: int = 3) -> list[dict[str, Any]]:
-    """Top features by squared reconstruction error, with the direction of the surprise."""
+                  recon_std: np.ndarray, top_k: int = 3, min_share: float = 0.10) -> list[dict[str, Any]]:
+    """Top features by squared reconstruction error, with the direction of the surprise.
+
+    Features carrying less than `min_share` of the total error are left out (always keeping the top one),
+    so the reasons shown are the ones that actually made the claim unusual.
+    """
     err = (np.asarray(x_std) - np.asarray(recon_std)) ** 2
     total = float(err.sum()) or 1.0
-    order = np.argsort(-err)[:top_k]
+    order = [i for j, i in enumerate(np.argsort(-err)[:top_k]) if j == 0 or err[i] / total >= min_share]
     out = []
     for i in order:
         name = feature_names[i]

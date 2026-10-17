@@ -93,6 +93,8 @@ class Hub:
         for q, p in list(self.subs.items()):
             if p.role == "provider" and provider_token != p.provider_token:
                 continue  # providers only ever see their own claims
+            if p.role == "provider" and event == "metrics":
+                continue
             if p.role == "auditor" and event != "metrics":
                 continue  # auditors get aggregates only
             try:
@@ -333,7 +335,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def gen():
             try:
                 yield f"event: hello\ndata: {json.dumps({'role': p.role, 'provider_token': p.provider_token})}\n\n"
-                yield f"event: metrics\ndata: {json.dumps(s.metrics.snapshot())}\n\n"
+                if p.role != "provider":  # providers only ever see their own claims
+                    yield f"event: metrics\ndata: {json.dumps(s.metrics.snapshot())}\n\n"
+                yield ": stream open\n\n"  # SSE comment: flushes proxies so the browser knows it's live
                 while True:
                     if await request.is_disconnected():
                         break

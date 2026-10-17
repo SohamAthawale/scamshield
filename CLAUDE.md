@@ -39,6 +39,33 @@ Real-time Medicare claim integrity on IBM LinuxONE. Score every claim the moment
 - [ ] Whether AI coding assistants (e.g. Claude Code) are allowed. Someone asked this in the kickoff chat; the answer was not captured. **Confirm in writing before relying on it**, and disclose usage in the README if allowed.
 - [ ] Team size limits and whether the repo must be public.
 
+## Status (2026-10-17, updated by Claude Code)
+
+**Built and running on the z17 VM** (address in your local `.env`, never committed). api + Granite worker in Docker Compose; full demo replay done; 448 tests pass.
+
+Done:
+- [x] Phase 0: probe saved (z17 type 9175, `nnpa`), Docker 29.8, L1CC image pulled, `ACCEL_MODE=nnpa`, deps resolved (`docs/ENV_REPORT.md`)
+- [x] Phase 1: data (GitHub mirror, counts verified), features with streaming/batch parity, provider split 70/15/15
+- [x] Phase 2: XGBoost provider model (test ROC-AUC 0.942, PR-AUC 0.675), PyTorch autoencoder, thresholds tuned on a replayed validation stream, MODEL_CARD
+- [x] Phase 3: scoring engine, FastAPI (micro-batching, SSE, RBAC), containers, simulator with injected errors
+- [x] Phase 4: pseudonymisation, AES-256-GCM, JWT roles, hash-chained audit with external anchor, tamper test verified on VM, SECURITY.md
+- [x] Phase 5: dashboard (investigator / provider / auditor), Granite worker
+- [x] Phase 6: NNPA vs CPU benchmark, Granite speed tests, fairness notebook
+- [x] Notebooks 01–03 executed on LinuxONE (`notebooks/`)
+
+Still to do (people, not code):
+- [ ] Confirm with organisers: video time limit, deadline time zone, **whether AI coding assistants are allowed** (disclose in README if so)
+- [ ] Fill in team roles (README, Section 11)
+- [ ] Record the demo video following `docs/DEMO_SCRIPT.md`; take screenshots (Jupyter on LinuxONE, terminal with `nnpa`, dashboard, tamper test)
+- [ ] Slides (6–8)
+- [ ] Push the repo to GitHub (nothing is pushed yet; data, models and secrets are gitignored)
+
+Decisions that changed from the original plan (details in ENV_REPORT.md):
+- Telum acceleration via **`torch_nnpa`** (in the L1CC image), not zDLC/Snap ML. Routed by batch size: NNPA for ≥256 claims/call (1.4–1.6x CPU), CPU below.
+- Granite: **`granite-3.3-2b-instruct-be.Q8_0.gguf`** from `taronaeo/Granite-3.3-2B-Instruct-BE-GGUF` (the image only has a base model). ~1.5 tok/s on 3 vCPUs, so notes are async with an instant template fallback.
+- `cryptography` built from source in our Dockerfile (no s390x wheel).
+- New hard rule `no_coverage` (patient has no Part A/B coverage for the service), discovered by the autoencoder.
+
 ## 1. Hard rules
 
 1. All solution code is written in this repo during the datathon window (Oct 17-18). Environment setup (registration, VM, Docker, probing) can happen before H0; solution code cannot. Do not copy code from other projects, tutorials or **the four reference lab notebooks** (Fraud LSTM, Churn, MNIST, Loan Approval). Public datasets, libraries and container images are fine.

@@ -1,0 +1,119 @@
+{
+ "data": {
+  "claims": 558211,
+  "providers": 5410,
+  "providers_by_split": {
+   "size": {
+    "test": 811,
+    "train": 3787,
+    "val": 812
+   },
+   "sum": {
+    "test": 76,
+    "train": 354,
+    "val": 76
+   }
+  }
+ },
+ "provider_model": {
+  "val_history25": {
+   "n": 812,
+   "positives": 76,
+   "pr_auc": 0.6701311601114197,
+   "roc_auc": 0.9266125572082381,
+   "precision_top5pct": 0.8048780487804879,
+   "recall_top5pct": 0.4342105263157895,
+   "base_rate": 0.09359605911330049
+  },
+  "val_history100": {
+   "n": 812,
+   "positives": 76,
+   "pr_auc": 0.725667954023961,
+   "roc_auc": 0.9436320080091533,
+   "precision_top5pct": 0.7317073170731707,
+   "recall_top5pct": 0.39473684210526316,
+   "base_rate": 0.09359605911330049
+  },
+  "test_history25": {
+   "n": 811,
+   "positives": 76,
+   "pr_auc": 0.6554432533657198,
+   "roc_auc": 0.9279985678481919,
+   "precision_top5pct": 0.7804878048780488,
+   "recall_top5pct": 0.42105263157894735,
+   "base_rate": 0.093711467324291
+  },
+  "test_history100": {
+   "n": 811,
+   "positives": 76,
+   "pr_auc": 0.6752955909859798,
+   "roc_auc": 0.9423737916219119,
+   "precision_top5pct": 0.7317073170731707,
+   "recall_top5pct": 0.39473684210526316,
+   "base_rate": 0.093711467324291
+  }
+ },
+ "autoencoder": {
+  "train_loss_by_epoch": [
+   0.6759353117623154,
+   0.31569101630194624,
+   0.25059892379666737,
+   0.2234592543091964,
+   0.20814723311099334,
+   0.19981692204908277,
+   0.194509896045413,
+   0.19107239842186752
+  ],
+  "threshold_quantile": 0.99,
+  "anomaly_threshold": 2.957554340362549,
+  "flag_rate_test": 0.009529989566633585,
+  "claim_auc_vs_provider_label_test": 0.5217274727301529,
+  "rule_hits_test": {
+   "after_death": 0,
+   "end_before_start": 0,
+   "discharge_before_admission": 0,
+   "missing_attending": 212,
+   "no_coverage": 282,
+   "duplicate": 1
+  }
+ },
+ "thresholds": {
+  "anomaly_threshold": 2.957554340362549,
+  "provider_threshold": 0.56,
+  "min_provider_claims": 10,
+  "hold_cap": 0.02,
+  "min_hold_precision_val": 0.7
+ },
+ "decisions_val": {
+  "claims": 77383,
+  "mix": {
+   "PAY": 0.987,
+   "RETURN_WITH_FIX": 0.0072,
+   "HOLD_FOR_REVIEW": 0.0058
+  },
+  "hold_precision_flagged_provider": 0.703125,
+  "return_share_from_flagged_provider": 0.11071428571428571,
+  "dollars_held": 1331850.0,
+  "base_rate_flagged_provider_claims": 0.3589031182559477
+ },
+ "decisions_test": {
+  "claims": 78594,
+  "mix": {
+   "PAY": 0.9878,
+   "RETURN_WITH_FIX": 0.0073,
+   "HOLD_FOR_REVIEW": 0.005
+  },
+  "hold_precision_flagged_provider": 0.6138107416879796,
+  "return_share_from_flagged_provider": 0.12631578947368421,
+  "dollars_held": 1265680.0,
+  "base_rate_flagged_provider_claims": 0.36154159350586557
+ },
+ "versions": {
+  "xgboost": "3.4.1",
+  "torch": "2.11.0+cpu",
+  "numpy": "2.0.2",
+  "pandas": "3.0.6"
+ },
+ "seconds": 44.8,
+ "stream_file": "data/stream_test.csv"
+}

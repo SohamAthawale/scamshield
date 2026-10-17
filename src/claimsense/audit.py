@@ -62,7 +62,8 @@ class AuditLog:
         self.lock = lock or threading.Lock()
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.checkpoint_every = checkpoint_every
-        self._head: tuple[int, str] | None = None  # (id, hash) this process last wrote
+        self._head: tuple[int, str] | None = None  # (id, hash) this process last COMMITTED
+        self._pending: tuple[int, str] | None = None  # written inside a transaction not yet committed
         self._last_checkpoint_id = 0
         with self.lock:
             conn.executescript(SCHEMA)
@@ -111,12 +112,21 @@ class AuditLog:
                 "INSERT INTO audit (ts, actor, action, subject, details, prev_hash, hash) VALUES (?,?,?,?,?,?,?)",
                 (row["ts"], actor, action, subject, row["details"], prev, h),
             )
-            self._head = (int(cur.lastrowid), h)
+            self._pending = (int(cur.lastrowid), h)
             if commit:
                 self.conn.commit()
-        if commit:
-            self.maybe_checkpoint()
+                self.committed()
         return h
+
+    def committed(self) -> None:
+        """Call after committing a transaction that contained append(..., commit=False) entries."""
+        if self._pending is not None:
+            self._head, self._pending = self._pending, None
+        self.maybe_checkpoint()
+
+    def rolled_back(self) -> None:
+        """Call after rolling back: entries from that transaction no longer exist, so forget them."""
+        self._pending = None
 
     def maybe_checkpoint(self) -> None:
         """Write a checkpoint when checkpoint_every entries were added since the last one. Call after commit."""

@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS claims (
     provider_claims INTEGER NOT NULL,
     rules TEXT NOT NULL,
     reasons TEXT NOT NULL,
-    latency_ms REAL,
+    model_ms REAL,
     backend TEXT,
     key_id TEXT NOT NULL,
     nonce BLOB NOT NULL,
@@ -94,7 +94,7 @@ class ClaimRecord:
     provider_claims: int
     rules: list[str]
     reasons: dict[str, Any]
-    latency_ms: float
+    model_ms: float
     backend: str
     payload: dict[str, Any]          # raw claim incl. real identifiers -> encrypted
     notes: list[tuple[str, str, dict]]  # (kind, template text, facts) queued for Granite
@@ -107,8 +107,15 @@ class Store:
         self.envelope = envelope
         with self.lock:
             self.conn.executescript(SCHEMA)
+            self._migrate()
             self.conn.commit()
         self.audit = AuditLog(self.conn, self.lock, checkpoint_path=checkpoint_path)
+
+    def _migrate(self) -> None:
+        """Bring databases created by earlier versions up to the current schema."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(claims)")}
+        if "latency_ms" in cols and "model_ms" not in cols:  # v0.1: column held model time under a wrong name
+            self.conn.execute("ALTER TABLE claims RENAME COLUMN latency_ms TO model_ms")
 
     # ------------------------------------------------------------------ writes
     def save_batch(self, records: Iterable[ClaimRecord], actor: str = "scorer") -> None:
@@ -122,7 +129,7 @@ class Store:
                         "INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (r.claim_token, r.provider_token, r.bene_token, ts, r.service_date, r.amount, r.is_inpatient,
                          r.action, r.anomaly, r.provider_risk, r.provider_claims, ",".join(r.rules),
-                         json.dumps(r.reasons), r.latency_ms, r.backend, sealed.key_id, sealed.nonce,
+                         json.dumps(r.reasons), r.model_ms, r.backend, sealed.key_id, sealed.nonce,
                          sealed.ciphertext))
                     for kind, text, facts in r.notes:
                         self.conn.execute(
@@ -138,19 +145,21 @@ class Store:
                 self.conn.commit()
             except Exception:
                 self.conn.rollback()
+                self.audit.rolled_back()
                 raise
-        self.audit.maybe_checkpoint()
+            self.audit.committed()
 
     def resolve_case(self, claim_token: str, status: str, user: str, comment: str = "") -> bool:
         with self.lock:
             cur = self.conn.execute(
-                "UPDATE cases SET status=?, resolved_by=?, resolved_at=?, comment=? WHERE claim_token=?",
+                "UPDATE cases SET status=?, resolved_by=?, resolved_at=?, comment=? WHERE claim_token=? AND status='open'",
                 (status, user, now(), comment[:500], claim_token))
-            if cur.rowcount == 0:
+            if cur.rowcount == 0:  # unknown claim, or already resolved: a decision is never silently overwritten
                 self.conn.rollback()
                 return False
             self.audit.append(user, "case_resolved", claim_token, {"status": status}, commit=False)
             self.conn.commit()
+            self.audit.committed()
             return True
 
     # ------------------------------------------------------------------ notes queue (Granite worker)
@@ -171,6 +180,7 @@ class Store:
         return [{"id": r[0], "claim_token": r[1], "kind": r[2], "facts": json.loads(r[3])} for r in rows]
 
     def complete_note(self, note_id: int, text: str | None, model: str, gen_ms: float, ok: bool) -> None:
+        ok = bool(ok and text)
         with self.lock:
             if ok and text:
                 self.conn.execute(
@@ -182,6 +192,7 @@ class Store:
             self.audit.append("granite-worker", "note_generated" if ok else "note_failed", str(note_id),
                               {"model": model, "gen_ms": round(gen_ms, 1)}, commit=False)
             self.conn.commit()
+            self.audit.committed()
 
     def requeue_stuck_notes(self) -> int:
         with self.lock:
@@ -208,14 +219,14 @@ class Store:
     def _row(self, r) -> dict[str, Any]:
         keys = ["claim_token", "provider_token", "bene_token", "received_at", "service_date", "amount",
                 "is_inpatient", "action", "anomaly", "provider_risk", "provider_claims", "rules", "reasons",
-                "latency_ms", "backend"]
+                "model_ms", "backend"]
         d = dict(zip(keys, r))
         d["rules"] = [x for x in d["rules"].split(",") if x]
         d["reasons"] = json.loads(d["reasons"])
         return d
 
     _COLS = ("claim_token, provider_token, bene_token, received_at, service_date, amount, is_inpatient, action, "
-             "anomaly, provider_risk, provider_claims, rules, reasons, latency_ms, backend")
+             "anomaly, provider_risk, provider_claims, rules, reasons, model_ms, backend")
 
     def list_cases(self, status: str = "open", limit: int = 100) -> list[dict[str, Any]]:
         with self.lock:

@@ -26,6 +26,12 @@ log = logging.getLogger("claimsense.granite")
 RAW_ID = re.compile(r"\b(BENE|PRV|PHY|CLM)\d{3,}\b")
 
 
+def trim_to_sentence(text: str) -> str:
+    """Cut a completion that hit the token limit back to its last full sentence."""
+    m = list(re.finditer(r"[.!?](\s|$)", text))
+    return text[: m[-1].end()].strip() if m else ""
+
+
 class GraniteWriter:
     def __init__(self, model_path: str, threads: int, ctx: int = 2048, max_tokens: int = 180):
         from llama_cpp import Llama
@@ -40,6 +46,8 @@ class GraniteWriter:
         out = self.llm.create_chat_completion(messages=build_messages(kind, facts), temperature=0.2,
                                               max_tokens=self.max_tokens)
         text = out["choices"][0]["message"]["content"].strip()
+        if out["choices"][0].get("finish_reason") == "length":
+            text = trim_to_sentence(text)
         if not text:
             raise ValueError("empty completion")
         if RAW_ID.search(text):

@@ -7,6 +7,7 @@ built from real claims:
   dates_swapped   end date before start date
   duplicate       the same service submitted twice under a new claim number
   no_attending    attending physician left blank
+  no_coverage     billed for a patient with no Part A (inpatient) / Part B (outpatient) coverage on record
 
 The API is never told which claims were injected; the simulator keeps that ground truth locally and
 reports how many were caught (RETURN_WITH_FIX or HOLD_FOR_REVIEW).
@@ -28,14 +29,15 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-INJECTIONS = ("amount_typo", "after_death", "dates_swapped", "duplicate", "no_attending")
+INJECTIONS = ("amount_typo", "after_death", "dates_swapped", "duplicate", "no_attending", "no_coverage")
 
 
 def _shift(date_str: str, days: int) -> str:
     return (dt.date.fromisoformat(date_str) + dt.timedelta(days=days)).isoformat()
 
 
-def inject(claim: dict, kind: str, deceased: dict[str, str], rng: random.Random, n: int) -> dict | None:
+def inject(claim: dict, kind: str, deceased: dict[str, str], rng: random.Random, n: int,
+           uncovered: dict[str, list[str]] | None = None) -> dict | None:
     c = dict(claim)
     c["ClaimID"] = f"{claim['ClaimID']}-INJ{n}"
     if kind == "amount_typo":
@@ -64,6 +66,11 @@ def inject(claim: dict, kind: str, deceased: dict[str, str], rng: random.Random,
         pass  # identical service, new claim number
     elif kind == "no_attending":
         c["AttendingPhysician"] = None
+    elif kind == "no_coverage":
+        pool = (uncovered or {}).get("A" if int(c["is_inpatient"]) else "B", [])
+        if not pool:
+            return None
+        c["BeneID"] = rng.choice(pool)
     return c
 
 
@@ -83,6 +90,16 @@ def load_stream(path: Path, limit: int | None, offset: int = 0) -> list[dict]:
     return out
 
 
+def uncovered_benes(raw_dir: Path) -> dict[str, list[str]]:
+    """Beneficiaries with zero months of Part A ("A") or Part B ("B") coverage."""
+    files = sorted(raw_dir.glob("Train_Beneficiarydata*.csv"))
+    if not files:
+        return {}
+    b = pd.read_csv(files[0], usecols=["BeneID", "NoOfMonths_PartACov", "NoOfMonths_PartBCov"])
+    return {"A": b.loc[b["NoOfMonths_PartACov"] == 0, "BeneID"].tolist(),
+            "B": b.loc[b["NoOfMonths_PartBCov"] == 0, "BeneID"].tolist()}
+
+
 def deceased_benes(raw_dir: Path) -> dict[str, str]:
     files = sorted(raw_dir.glob("Train_Beneficiarydata*.csv"))
     if not files:
@@ -96,14 +113,21 @@ async def run(url: str, token: str, claims: list[dict], rate: float, concurrency
               raw_dir: Path, seed: int, burst_every: int, burst_size: int, out_dir: Path) -> dict:
     rng = random.Random(seed)
     deceased = deceased_benes(raw_dir) if inject_rate > 0 else {}
+    uncovered = uncovered_benes(raw_dir) if inject_rate > 0 else {}
     queue: list[tuple[dict, str | None, int | None]] = []  # (claim, injected kind, index it must wait for)
     n_inj = 0
+    attempt = 0
     for c in claims:
         queue.append((c, None, None))
         orig = len(queue) - 1
         if inject_rate and rng.random() < inject_rate:
-            kind = INJECTIONS[n_inj % len(INJECTIONS)]
-            ic = inject(c, kind, deceased, rng, n_inj)
+            ic = None
+            for _ in range(len(INJECTIONS)):  # rotate kinds; skip ones impossible here (e.g. nobody uncovered)
+                kind = INJECTIONS[attempt % len(INJECTIONS)]
+                attempt += 1
+                ic = inject(c, kind, deceased, rng, n_inj, uncovered)
+                if ic is not None:
+                    break
             if ic is not None:
                 # a duplicate is a RE-submission: it follows the original's answer, never races it
                 queue.append((ic, kind, orig if kind == "duplicate" else None))
