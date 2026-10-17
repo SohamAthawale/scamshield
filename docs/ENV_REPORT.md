@@ -34,9 +34,8 @@ The extracted CSV from the second mirror has the **same SHA-256** as the first m
 
 ## Decisions (and why)
 
-1. **Pivot from ClaimSense (Medicare claims) to ScamShield (payments).**
-   - ClaimSense is complete and stays on the `main` branch.
-   - Reasons for the pivot:
+1. **Problem choice: scams and mule accounts in payments.**
+   - Reasons:
      - scams are an urgent Australian problem;
      - in-transaction payment scoring is Telum's home turf;
      - IBM's own AML data has per-payment labels and typed laundering schemes.

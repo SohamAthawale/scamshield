@@ -4,8 +4,6 @@ IBM Z Datathon 2026 (24 hours, October 17-18, 2026), **Theme 1: Real-Time AI for
 
 Real-time scam and mule-account interception on IBM LinuxONE. Score every payment before the money moves: let normal payments through, warn customers about out-of-character or risky payments, and pause payments that match laundering/mule patterns for a call-back, with an evidence brief for the analyst.
 
-> Branch `scamshield`. The earlier project, ClaimSense (Medicare claim integrity), is complete on `main` and stays there.
-
 ---
 
 ## 0. How to use this file (Claude Code, read first)
@@ -57,7 +55,6 @@ Still to do (people, not code):
 - [ ] Confirm with organisers: video time limit, deadline time zone, **whether AI coding assistants are allowed** (disclose in README if so)
 - [ ] Fill in team roles (README)
 - [ ] Record the demo video following `docs/DEMO_SCRIPT.md`; screenshots (Jupyter on LinuxONE, terminal with `nnpa`, dashboard, tamper test)
-- [ ] Decide which branch/repo to submit (ScamShield on `scamshield`, ClaimSense on `main`)
 
 ## 1. Hard rules
 
@@ -98,7 +95,7 @@ Still to do (people, not code):
 - **Container:** an isolated process with its own filesystem image. Images must be built for s390x. Official Docker Hub images such as `python` are multi-arch and include s390x.
 - **Pod:** a group of containers sharing one network namespace and deployed as one unit. Podman can create pods locally (`podman pod create`) and run a Kubernetes Pod YAML directly (`podman kube play`).
 - **Docker has no pod object.** Docker Compose gives the same practical result.
-- **Our choice:** Docker Compose on Ubuntu is primary (that is the official path). Ship `deploy/claimsense-pod.yaml` as a stretch for `podman kube play` and the "OpenShift-ready" line.
+- **Our choice:** Docker Compose on Ubuntu is primary (that is the official path). A Kubernetes Pod YAML for `podman kube play` remains a stretch goal.
 
 ### 4.3 Jupyter notebooks (official setup, verified against the README)
 
@@ -148,7 +145,7 @@ The L1CC Jupyter image already contains NNPA-enabled builds of everything we nee
 
 - Run Claude Code on the laptop in this repo. The VM is the runtime.
 - `scripts/remote.sh "<cmd>"` wraps `ssh -i "$L1CC_KEY" linux1@"$L1CC_HOST"`.
-- `scripts/sync.sh` rsyncs the repo to `~/claimsense` on the VM, excluding `data/`, `models/`, `.env`, `.git`, `*.pem`.
+- `scripts/sync.sh` rsyncs the repo to `~/scamshield` on the VM, excluding `data/`, `models/`, `.env`, `.git`, `*.pem`.
 - `scripts/tunnel.sh` opens SSH tunnels so the laptop browser can reach the VM:
   `ssh -i "$L1CC_KEY" -N -L 8000:localhost:8000 -L 38888:localhost:38888 linux1@"$L1CC_HOST"`
 - Publish container ports on `127.0.0.1` only. Access is always through the tunnel.
