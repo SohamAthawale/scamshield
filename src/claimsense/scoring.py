@@ -71,14 +71,7 @@ class Engine:
         t0 = time.perf_counter()
         cf_rows, pf_rows, n_claims, rules = [], [], [], []
         for it in items:
-            f = claim_features(it.claim, it.bene, self.ctx)
-            errs = hard_errors(it.claim, it.bene)
-            if self.duplicates.check_and_add(duplicate_key(it.claim, it.bene_key, it.provider_key)):
-                errs.append("duplicate")
-            st = self.providers.get(it.provider_key)
-            if st is None:
-                st = self.providers[it.provider_key] = ProviderState()
-            st.update(f, it.bene_key, it.attending_key, self.ctx.rare_pair_threshold)
+            f, errs, st = self._observe(it)
             cf_rows.append(f)
             pf_rows.append(st.features())
             n_claims.append(st.n)
@@ -100,6 +93,23 @@ class Engine:
 
     def score(self, item: ClaimInput) -> ScoreResult:
         return self.score_batch([item])[0]
+
+    def _observe(self, it: ClaimInput) -> tuple[dict[str, float], list[str], ProviderState]:
+        """Update the rolling state with one claim: features, rule hits, duplicate index, provider state."""
+        f = claim_features(it.claim, it.bene, self.ctx)
+        errs = hard_errors(it.claim, it.bene)
+        if self.duplicates.check_and_add(duplicate_key(it.claim, it.bene_key, it.provider_key)):
+            errs.append("duplicate")
+        st = self.providers.get(it.provider_key)
+        if st is None:
+            st = self.providers[it.provider_key] = ProviderState()
+        st.update(f, it.bene_key, it.attending_key, self.ctx.rare_pair_threshold)
+        return f, errs, st
+
+    def replay(self, items: Sequence[ClaimInput]) -> None:
+        """Rebuild rolling state from already-decided claims (after a restart) without re-scoring them."""
+        for it in items:
+            self._observe(it)
 
     def reasons(self, res: ScoreResult, z: np.ndarray, r: np.ndarray, p: np.ndarray) -> dict[str, Any]:
         d = res.decision

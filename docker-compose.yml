@@ -1,0 +1,103 @@
+# ClaimSense on IBM LinuxONE.
+#   docker compose up -d --build                 api + Granite worker
+#   docker compose --profile demo up simulator   replay held-out claims (with injected billing errors)
+#   docker compose --profile dev up -d jupyter   notebooks (training, charts)
+# Only the api is published, and only on 127.0.0.1. Reach it through scripts/tunnel.sh.
+
+x-app: &app
+  image: claimsense-app:latest
+  build:
+    context: .
+    dockerfile: deploy/app.Dockerfile
+  user: "1000:1000"
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  restart: unless-stopped
+  environment: &env
+    CLAIMSENSE_SECRETS: /run/secrets
+    CLAIMSENSE_DATA_DIR: /data
+    CLAIMSENSE_MODELS: /models
+    CLAIMSENSE_RAW: /raw
+    CLAIMSENSE_POLICY: /app/config/policy.json
+
+services:
+  api:
+    <<: *app
+    environment:
+      <<: *env
+      ANOMALY_BACKEND: ${ACCEL_MODE:-auto}
+      NNPA_MIN_BATCH: ${NNPA_MIN_BATCH:-256}
+      BATCH_WINDOW_MS: ${BATCH_WINDOW_MS:-3}
+      MAX_BATCH: ${MAX_BATCH:-512}
+    volumes:
+      - ${SHARED:-/home/linux1/shared}/models:/models:ro
+      - ${SHARED:-/home/linux1/shared}/data/raw:/raw:ro
+      - ./secrets:/run/secrets:ro
+      - appdata:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  granite:
+    <<: *app
+    command: ["python", "-m", "claimsense.granite_worker"]
+    environment:
+      <<: *env
+      GRANITE_MODEL: /llm/${GRANITE_FILE:-granite-3.3-2b-instruct-be.Q8_0.gguf}
+      GRANITE_THREADS: ${GRANITE_THREADS:-3}
+      GRANITE_MAX_TOKENS: ${GRANITE_MAX_TOKENS:-120}
+    volumes:
+      - ${SHARED:-/home/linux1/shared}/models/llm:/llm:ro
+      - ./secrets:/run/secrets:ro
+      - appdata:/data
+    mem_limit: 3g
+    # Granite is off the hot path: it may use idle CPU, but yields to claim scoring under contention
+    cpu_shares: 128
+    depends_on:
+      api:
+        condition: service_healthy
+
+  simulator:
+    <<: *app
+    profiles: [demo]
+    restart: "no"
+    command: ["python", "-m", "claimsense.simulator", "--url", "http://api:8000", "--limit", "${SIM_LIMIT:-5000}",
+              "--rate", "${SIM_RATE:-100}", "--inject", "${SIM_INJECT:-0.01}", "--concurrency", "${SIM_CONCURRENCY:-64}"]
+    environment:
+      <<: *env
+      STREAM_FILE: /data-in/stream_test.csv
+      SIM_OUT: /sim
+    volumes:
+      - ${SHARED:-/home/linux1/shared}/data:/data-in:ro
+      - ${SHARED:-/home/linux1/shared}/data/raw:/raw:ro
+      - ${SHARED:-/home/linux1/shared}/sim:/sim
+      - ./secrets/service_token:/run/secrets/service_token:ro
+    mem_limit: 512m
+    depends_on:
+      api:
+        condition: service_healthy
+
+  jupyter:
+    image: registry.linuxone.cloud.marist.edu/l1cc/jupyterlab-image-s390x:latest
+    profiles: [dev]
+    command: ["jupyter", "lab", "--ServerApp.ip=0.0.0.0", "--ServerApp.port=38888",
+              "--ServerApp.token=${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}", "--ServerApp.allow_origin=http://localhost:38888"]
+    environment:
+      PYTHONPATH: /home/ibm-user/claimsense/src
+    volumes:
+      - ${SHARED:-/home/linux1/shared}:/home/ibm-user/shared
+      - ./:/home/ibm-user/claimsense
+    ports:
+      - "127.0.0.1:38888:38888"
+    mem_limit: 3g
+
+volumes:
+  appdata:

@@ -127,13 +127,13 @@ SYSTEM_PROMPTS = {
     "correction": (
         "You write short, friendly notes to a medical practice's billing staff. The claim was returned, "
         "not rejected. Explain in plain English what looks wrong and exactly what to check. Do not accuse "
-        "anyone. Use only the facts given. 3 to 5 sentences. No greeting, no sign-off."
+        "anyone. Use only the facts given. 2 to 4 short sentences. No greeting, no sign-off."
     ),
     "brief": (
         "You write neutral evidence briefs for a healthcare payment integrity investigator. Summarise why "
         "this claim was held, using only the facts given. State that the score is a model estimate and "
         "not a finding of fraud. Mention what evidence would confirm or rule out a problem. "
-        "4 to 6 sentences. No headings."
+        "3 to 5 short sentences. No headings."
     ),
 }
 

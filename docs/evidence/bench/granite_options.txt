@@ -1,0 +1,4 @@
+op_offload=True threads=3: cold prompt 142 tok in 23.7s (6.0 tok/s); warm prompt+24 tok in 28.9s
+op_offload=True threads=2: cold prompt 142 tok in 42.8s (3.3 tok/s); warm prompt+24 tok in 39.0s
+op_offload=False threads=3: cold prompt 142 tok in 22.9s (6.2 tok/s); warm prompt+24 tok in 28.9s
+op_offload=False threads=2: cold prompt 142 tok in 22.5s (6.3 tok/s); warm prompt+24 tok in 38.4s

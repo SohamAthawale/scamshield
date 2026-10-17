@@ -63,6 +63,7 @@ class AuditLog:
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.checkpoint_every = checkpoint_every
         self._head: tuple[int, str] | None = None  # (id, hash) this process last wrote
+        self._last_checkpoint_id = 0
         with self.lock:
             conn.executescript(SCHEMA)
             conn.commit()
@@ -113,9 +114,18 @@ class AuditLog:
             self._head = (int(cur.lastrowid), h)
             if commit:
                 self.conn.commit()
-        if self.checkpoint_path is not None and commit and self._head[0] % self.checkpoint_every == 0:
-            self.checkpoint()
+        if commit:
+            self.maybe_checkpoint()
         return h
+
+    def maybe_checkpoint(self) -> None:
+        """Write a checkpoint when checkpoint_every entries were added since the last one. Call after commit."""
+        if self.checkpoint_path is None or self._head is None:
+            return
+        if self._head[0] - self._last_checkpoint_id >= self.checkpoint_every:
+            cp = self.checkpoint()
+            if cp:
+                self._last_checkpoint_id = cp[0]
 
     def verify(self) -> VerifyResult:
         prev = GENESIS

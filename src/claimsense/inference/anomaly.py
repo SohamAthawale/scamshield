@@ -1,9 +1,9 @@
 """Claim autoencoder scoring: torch on the Telum II NNPA, torch on CPU, or pure NumPy.
 
-Measured on z17 (docs/evidence/bench/nnpa_smoke.txt): for this small network the NNPA wins from a few
-hundred rows per batch upward (about 2x at 4096) and loses slightly at batch 1 because of dispatch
-overhead. The torch scorer therefore sends batches of at least `nnpa_min_batch` rows to the NNPA and
-smaller ones to the CPU. The API micro-batches concurrent claims to make use of that.
+Measured on z17 with the trained model and real claims (docs/evidence/bench/bench_autoencoder.csv): the
+NNPA is slower than the CPU up to ~64 claims per call (dispatch overhead), even at 256, 1.4x faster at
+1024 and 1.6x at 4096, and slower again for one huge call of 16384. So batches of at least
+`nnpa_min_batch` rows go to the NNPA in chunks of at most `nnpa_chunk` rows; smaller ones stay on the CPU.
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class NumpyAnomalyScorer(_Base):
 
 
 class TorchAnomalyScorer(_Base):
-    def __init__(self, art: Artifacts, use_nnpa: bool, nnpa_min_batch: int = 256):
+    def __init__(self, art: Artifacts, use_nnpa: bool, nnpa_min_batch: int = 256, nnpa_chunk: int = 4096):
         import torch
 
         self.torch = torch
@@ -66,6 +66,7 @@ class TorchAnomalyScorer(_Base):
         self.cpu_model.load_state_dict(state)
         self.nnpa_model = None
         self.nnpa_min_batch = nnpa_min_batch
+        self.nnpa_chunk = nnpa_chunk
         self._lock = threading.Lock()  # one NNPA call at a time from this process
         if use_nnpa:
             import torch_nnpa  # noqa: F401  (registers the 'nnpa' device)
@@ -84,7 +85,9 @@ class TorchAnomalyScorer(_Base):
         with torch.no_grad():
             if use_nnpa and force != "cpu":
                 with self._lock:
-                    return self.nnpa_model(x.to(self.device)).cpu().numpy()
+                    parts = [self.nnpa_model(x[i:i + self.nnpa_chunk].to(self.device)).cpu()
+                             for i in range(0, len(x), self.nnpa_chunk)]
+                return torch.cat(parts).numpy()
             return self.cpu_model(x).numpy()
 
 
