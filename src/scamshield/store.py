@@ -229,6 +229,16 @@ class Store:
                 out.append(d)
         return out
 
+    def any_payment(self, tokens: list[str]) -> bool:
+        """True if any of these payment tokens is already stored."""
+        with self.lock:
+            for i in range(0, len(tokens), 500):
+                chunk = tokens[i:i + 500]
+                q = f"SELECT 1 FROM payments WHERE payment_token IN ({','.join('?' * len(chunk))}) LIMIT 1"
+                if self.conn.execute(q, chunk).fetchone():
+                    return True
+        return False
+
     def get_payment(self, token: str, decrypt: bool = False) -> dict[str, Any] | None:
         with self.lock:
             r = self.conn.execute(f"SELECT {self._COLS}, key_id, nonce, ciphertext FROM payments WHERE payment_token=?",

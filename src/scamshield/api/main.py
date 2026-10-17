@@ -32,7 +32,7 @@ from ..scoring import Engine, PaymentInput
 from ..security import Pseudonymizer, load_keyring, read_secret
 from ..store import PaymentRecord, Store
 from .auth import Authenticator, Principal, require
-from .schemas import LoginIn, PaymentIn, PaymentOut, ResolveIn
+from .schemas import LoginIn, PaymentFileIn, PaymentFileOut, PaymentIn, PaymentOut, ResolveIn
 from .settings import Settings
 
 log = logging.getLogger("scamshield.api")
@@ -212,20 +212,32 @@ class Service:
                     if not fut.done():
                         fut.set_exception(e)
                 continue
-            self.metrics.batch_sizes.append(len(batch))
-            for (p, fut, t0), out in zip(batch, outs):
-                out["latency_ms"] = round((time.perf_counter() - t0) * 1000.0, 3)
-                out["batch_size"] = len(batch)
-                self.metrics.add(out["latency_ms"], out["model_ms"], out["action"], out["_usd"],
-                                 out["backend"] == "torch_nnpa")
-                self.hub.publish("payment", {
-                    "payment_token": out["payment_token"], "sender_token": out["_sender"],
-                    "receiver_token": out["_receiver"], "amount_usd": round(out["_usd"], 2),
-                    "payment_format": p.payment_format, "action": out["action"], "latency_ms": out["latency_ms"],
-                    "rules": [r["rule"] for r in out["reasons"].get("rules", [])],
-                }, account_token=out["_sender"])
+            self._finish([b[0] for b in batch], outs, [b[2] for b in batch])
+            for (_, fut, _), out in zip(batch, outs):
                 if not fut.done():
                     fut.set_result(out)
+
+    async def submit_file(self, payments: list[PaymentIn]) -> list[dict[str, Any]]:
+        """A bulk file is one batch. It runs on the same single engine thread as the live micro-batches,
+        so rolling state is still updated one call at a time."""
+        t0 = time.perf_counter()
+        outs = await asyncio.get_running_loop().run_in_executor(self.pool, self._process, payments)
+        self._finish(payments, outs, [t0] * len(payments))
+        return outs
+
+    def _finish(self, payments: list[PaymentIn], outs: list[dict[str, Any]], t0s: list[float]) -> None:
+        self.metrics.batch_sizes.append(len(payments))
+        for p, out, t0 in zip(payments, outs, t0s):
+            out["latency_ms"] = round((time.perf_counter() - t0) * 1000.0, 3)
+            out["batch_size"] = len(payments)
+            self.metrics.add(out["latency_ms"], out["model_ms"], out["action"], out["_usd"],
+                             out["backend"] == "torch_nnpa")
+            self.hub.publish("payment", {
+                "payment_token": out["payment_token"], "sender_token": out["_sender"],
+                "receiver_token": out["_receiver"], "amount_usd": round(out["_usd"], 2),
+                "payment_format": p.payment_format, "action": out["action"], "latency_ms": out["latency_ms"],
+                "rules": [r["rule"] for r in out["reasons"].get("rules", [])],
+            }, account_token=out["_sender"])
 
     def _process(self, payments: list[PaymentIn]) -> list[dict[str, Any]]:
         raws = [p.model_dump(mode="json") for p in payments]
@@ -339,6 +351,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             s.inflight.discard(ptok)
         return {k: v for k, v in out.items() if not k.startswith("_")}
+
+    @app.post("/payments/batch", response_model=PaymentFileOut)
+    async def post_payment_file(file: PaymentFileIn, request: Request, p: Principal = Depends(require("service"))):
+        """Score a bulk payment file in one call. All or nothing: any payment id already submitted (or repeated
+        in the file) rejects the whole file with 409, so a resent file never double-counts."""
+        s = svc(request)
+        toks = [s.pseudo.token("payment", x.payment_id) for x in file.payments]
+        if len(set(toks)) != len(toks):
+            raise HTTPException(409, "payment id repeated in the file")
+        if any(t in s.inflight for t in toks) or await asyncio.to_thread(s.store.any_payment, toks):
+            raise HTTPException(409, "file contains a payment already submitted")
+        s.inflight.update(toks)
+        t0 = time.perf_counter()
+        try:
+            outs = await s.submit_file(file.payments)
+        finally:
+            s.inflight.difference_update(toks)
+        return {"results": [{k: v for k, v in o.items() if not k.startswith("_")} for o in outs],
+                "batch_size": len(outs), "backend": outs[0]["backend"],
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
 
     @app.get("/metrics")
     async def metrics(request: Request, p: Principal = Depends(require("analyst", "auditor"))):

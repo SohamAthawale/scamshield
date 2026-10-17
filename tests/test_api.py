@@ -490,3 +490,55 @@ def test_metrics_count_payments_scored_on_nnpa():
     snap = m.snapshot()
     assert snap["payments_on_nnpa"] == 3 and snap["nnpa_share"] == 0.75 and snap["nnpa_min_batch"] == 1024
     assert Metrics().snapshot()["nnpa_share"] == 0.0 and Metrics().snapshot()["nnpa_min_batch"] == 0
+
+
+# ------------------------------------------------------------------------------ bulk payment files
+def post_file(client, env, payments, headers=None):
+    return client.post("/payments/batch", json={"payments": payments},
+                       headers=service_headers(env) if headers is None else headers)
+
+
+def test_payment_file_is_one_batch_in_order(client, api_env):
+    payments = [fresh_payment(1000 + i) for i in range(40)]
+    r = post_file(client, api_env, payments)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["batch_size"] == 40 and len(body["results"]) == 40
+    assert all(x["batch_size"] == 40 for x in body["results"])
+    # no NNPA on a CPU-only test machine, and a 40-payment file is far below NNPA_MIN_BATCH anyway
+    assert body["backend"] != "torch_nnpa"
+    tokens = [x["payment_token"] for x in body["results"]]
+    assert len(set(tokens)) == 40
+    m = client.get("/metrics", headers=login(client, "analyst", api_env)).json()
+    assert m["max_batch_size"] >= 40 and m["payments_total"] >= 40
+
+
+def test_payment_file_decisions_equal_single_posts(api_env, tmp_path):
+    """Same payments, same starting state (two empty stores): a file and one-by-one posts decide alike."""
+    payments = [fresh_payment(2000 + i, from_acct="8FSAME", amount_paid=50.0 * (i + 1) ** 2) for i in range(25)]
+    with api_env.client(db_path=tmp_path / "a.db", checkpoint_path=tmp_path / "a.log") as a:
+        one = post_all(a, api_env, payments)
+    with api_env.client(db_path=tmp_path / "b.db", checkpoint_path=tmp_path / "b.log") as b:
+        r = post_file(b, api_env, payments)
+        assert r.status_code == 200, r.text
+        res = r.json()["results"]
+    assert [x["action"] for x in res] == [x["action"] for x in one]
+    np.testing.assert_allclose([x["risk"] for x in res], [x["risk"] for x in one], atol=1e-4)
+    np.testing.assert_allclose([x["anomaly"] for x in res], [x["anomaly"] for x in one], atol=1e-4)
+
+
+def test_payment_file_rejects_repeats_and_resubmits_atomically(client, api_env):
+    a, b = fresh_payment(3000), fresh_payment(3001)
+    assert post_file(client, api_env, [a, a]).status_code == 409
+    assert post(client, api_env, b).status_code == 200
+    assert post_file(client, api_env, [a, b]).status_code == 409          # b already in: whole file refused
+    assert post(client, api_env, a).status_code == 200                    # ... and a was not stored by it
+
+
+def test_payment_file_needs_the_service_token_and_valid_size(client, api_env):
+    p = [fresh_payment(4000)]
+    assert post_file(client, api_env, p, headers={}).status_code == 401
+    assert post_file(client, api_env, p, headers=login(client, "analyst", api_env)).status_code == 403
+    assert post_file(client, api_env, []).status_code == 422
+    big = [fresh_payment(5000 + i) for i in range(4097)]
+    assert post_file(client, api_env, big).status_code == 422

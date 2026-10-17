@@ -51,6 +51,22 @@ class PaymentOut(BaseModel):
     batch_size: int
 
 
+MAX_FILE_PAYMENTS = 4096
+
+
+class PaymentFileIn(BaseModel):
+    """A bulk payment file (ACH / direct-entry batch, payroll run): scored in one call, so the Telum II NNPA
+    takes files of NNPA_MIN_BATCH payments or more."""
+    payments: list[PaymentIn] = Field(min_length=1, max_length=MAX_FILE_PAYMENTS)
+
+
+class PaymentFileOut(BaseModel):
+    results: list[PaymentOut]
+    batch_size: int
+    backend: str
+    latency_ms: float
+
+
 class LoginIn(BaseModel):
     username: str
     password: str

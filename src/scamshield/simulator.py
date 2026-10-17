@@ -81,7 +81,7 @@ def inject(base: dict, kind: str, history: dict[str, list[float]], mules: list[t
 
 
 async def run(url: str, token: str, payments: list[dict], rate: float, concurrency: int, inject_rate: float,
-              raw_dir: Path, seed: int, out_dir: Path) -> dict:
+              raw_dir: Path, seed: int, out_dir: Path, file_size: int = 0) -> dict:
     rng = random.Random(seed)
     mules = mule_accounts(raw_dir) if inject_rate > 0 else []
     history: dict[str, list[float]] = collections.defaultdict(list)
@@ -118,15 +118,36 @@ async def run(url: str, token: str, payments: list[dict], rate: float, concurren
                 if r.status_code != 200:
                     stats[f"http_{r.status_code}"] += 1
                     return
-                d = r.json()
-                stats[d["action"]] += 1
-                latencies.append((rt, d["latency_ms"], d["batch_size"]))
-                backends[d.get("backend", "?")] += 1
-                if kind:
-                    injected.append({"payment_id": p["payment_id"], "kind": kind, "action": d["action"],
-                                     "format": p["payment_format"], "risk": d["risk"],
-                                     "rules": [x["rule"] for x in d["reasons"].get("rules", [])]})
+                record(p, kind, r.json(), rt)
 
+        def record(p: dict, kind: str | None, d: dict, rt: float) -> None:
+            stats[d["action"]] += 1
+            latencies.append((rt, d["latency_ms"], d["batch_size"]))
+            backends[d.get("backend", "?")] += 1
+            if kind:
+                injected.append({"payment_id": p["payment_id"], "kind": kind, "action": d["action"],
+                                 "format": p["payment_format"], "risk": d["risk"],
+                                 "rules": [x["rule"] for x in d["reasons"].get("rules", [])]})
+
+        async def send_file(chunk: list[tuple[dict, str | None]]) -> None:
+            """One bulk payment file (POST /payments/batch); every payment in it gets the file's latency."""
+            async with sem:
+                t = time.perf_counter()
+                try:
+                    r = await client.post("/payments/batch", json={"payments": [p for p, _ in chunk]})
+                except httpx.HTTPError as e:
+                    stats[f"error:{type(e).__name__}"] += len(chunk)
+                    return
+                rt = (time.perf_counter() - t) * 1000.0
+                if r.status_code != 200:
+                    stats[f"http_{r.status_code}"] += len(chunk)
+                    return
+                for (p, kind), d in zip(chunk, r.json()["results"]):
+                    record(p, kind, d, rt)
+
+        if file_size > 0:
+            await asyncio.gather(*(send_file(queue[i:i + file_size]) for i in range(0, len(queue), file_size)))
+            queue = []
         tasks = []
         for i, (p, kind) in enumerate(queue):
             tasks.append(asyncio.create_task(send(p, kind)))
@@ -136,6 +157,7 @@ async def run(url: str, token: str, payments: list[dict], rate: float, concurren
                     await asyncio.sleep(delay)
         await asyncio.gather(*tasks)
 
+    sent = sum(stats.values())
     elapsed = time.perf_counter() - t_start
     lat = sorted(x[0] for x in latencies) or [0.0]
     srv = sorted(x[1] for x in latencies) or [0.0]
@@ -146,7 +168,7 @@ async def run(url: str, token: str, payments: list[dict], rate: float, concurren
         by_kind[k] = {"injected": int(len(s)), "warned": int((s["action"] == "WARN").sum()),
                       "held": int((s["action"] == "HOLD").sum()), "allowed": int((s["action"] == "ALLOW").sum())}
     summary = {
-        "sent": len(queue), "elapsed_s": round(elapsed, 2), "payments_per_sec": round(len(latencies) / elapsed, 1),
+        "sent": sent, "elapsed_s": round(elapsed, 2), "payments_per_sec": round(len(latencies) / elapsed, 1),
         "outcomes": dict(stats),
         "client_latency_ms": {"p50": round(lat[len(lat) // 2], 2), "p99": round(lat[max(int(len(lat) * 0.99) - 1, 0)], 2)},
         "server_latency_ms": {"p50": round(srv[len(srv) // 2], 2), "p99": round(srv[max(int(len(srv) * 0.99) - 1, 0)], 2)},
@@ -175,10 +197,12 @@ def main() -> None:
     ap.add_argument("--concurrency", type=int, default=64)
     ap.add_argument("--inject", type=float, default=0.01, help="share of payments followed by an injected one")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--file-size", type=int, default=0,
+                    help="send bulk payment files of this many payments (POST /payments/batch); 0 = one by one")
     a = ap.parse_args()
     token = Path(a.token_file).read_text().strip()
     s = asyncio.run(run(a.url, token, load_stream(a.stream, a.limit, a.offset), a.rate, a.concurrency, a.inject,
-                        a.raw, a.seed, a.out))
+                        a.raw, a.seed, a.out, a.file_size))
     print(json.dumps(s, indent=1))
 
 

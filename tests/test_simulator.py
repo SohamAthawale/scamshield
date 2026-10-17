@@ -106,12 +106,13 @@ class _ClientOverTestClient:
         return await asyncio.to_thread(self.tc.post, path, json=json, headers=self.headers)
 
 
-def _run(api_env, tmp_path, monkeypatch, payments, inject_rate, raw_dir):
+def _run(api_env, tmp_path, monkeypatch, payments, inject_rate, raw_dir, file_size=0):
     out = tmp_path / "sim"
-    with api_env.client() as tc:
+    with api_env.client(db_path=tmp_path / "db" / "s.db", checkpoint_path=tmp_path / "db" / "c.log") as tc:
         monkeypatch.setattr(simulator.httpx, "AsyncClient", lambda **kw: _ClientOverTestClient(tc, **kw))
         summary = asyncio.run(simulator.run("http://test", api_env.service_token, payments, rate=0, concurrency=1,
-                                            inject_rate=inject_rate, raw_dir=raw_dir, seed=3, out_dir=out))
+                                            inject_rate=inject_rate, raw_dir=raw_dir, seed=3, out_dir=out,
+                                            file_size=file_size))
     return summary, out
 
 
@@ -147,3 +148,12 @@ def test_run_still_injects_honest_payees_when_there_are_no_mules(api_env, tmp_pa
     payments = load_stream(api_env.stream_file, None)
     summary, _ = _run(api_env, tmp_path, monkeypatch, payments, 0.5, tmp_path / "no-raw-dir")
     assert summary["injected"]["honest_new_payee"]["injected"] > 0
+
+
+def test_run_in_bulk_files(api_env, tmp_path, monkeypatch, aml):
+    payments = load_stream(api_env.stream_file, None)
+    one, _ = _run(api_env, tmp_path / "one", monkeypatch, payments, 0.0, aml.raw_dir)
+    files, _ = _run(api_env, tmp_path / "files", monkeypatch, payments, 0.0, aml.raw_dir, file_size=64)
+    assert files["sent"] == len(payments) and sum(files["outcomes"].values()) == len(payments)
+    assert files["max_batch"] == min(64, len(payments)) and one["max_batch"] == 1
+    assert files["outcomes"] == one["outcomes"]                 # same payments, same state: same decisions
