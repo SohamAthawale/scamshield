@@ -227,3 +227,24 @@ def test_from_artifacts(aml, fresh_models_dir, tmp_path, models):
     (fresh_models_dir / "thresholds.json").unlink()
     pol.write_text(json.dumps({"anomaly_threshold": 3, "warn_threshold": 0.4, "hold_threshold": 0.9}))
     assert Engine.from_artifacts(fresh_models_dir, pol, a, r).policy == Policy(3.0, 0.4, 0.9)
+
+
+def test_engine_value_aware_policy_uses_the_payment_amount(aml, engine, live, models):
+    """Live engine == vectorised training decisions under a value-aware hold, and the amount matters."""
+    plain = policy_for(aml.models_dir)
+    Xt = aml.X[aml.split == "test"]
+    a, r = models["numpy"]
+    err, _, _ = a.score(Xt[:, AE_IDX])
+    risk = r.predict(Xt)
+    usd = np.array([it.amount_usd for it in live])
+    band = risk >= plain.hold_threshold
+    assert band.sum() >= 2
+    # strict above every live payment: only the amount decides inside the band
+    pol = Policy(plain.anomaly_threshold, plain.warn_threshold, plain.hold_threshold,
+                 hold_strict_threshold=float(risk.max()) + 1.0, hold_min_usd=float(np.median(usd[band])))
+    res = engine(policy=pol).score_batch(live)
+    expected = decisions(risk, err, rule_matrix(Xt, aml.ctx), pol, usd)
+    got = np.array([x.decision.action for x in res])
+    assert list(got) == list(expected)
+    assert (got[band & (usd >= pol.hold_min_usd)] == HOLD).all()
+    assert (got[band & (usd < pol.hold_min_usd)] == WARN).all() and (band & (usd < pol.hold_min_usd)).any()

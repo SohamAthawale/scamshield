@@ -4,10 +4,10 @@ import pandas as pd
 import pytest
 
 from scamshield.features import FEATURES, FeatureContext, FeatureEngine, rule_hits
-from scamshield.fusion import ALLOW, HOLD, WARN, decide
+from scamshield.fusion import ALLOW, HOLD, WARN, Policy, decide
 from scamshield.training import (
     AE_IDX, HISTORY_COLUMNS, decisions, ranking_metrics, rule_matrix, scheme_hits, summarise, train_risk_model,
-    tune_hold_threshold, write_history, write_stream,
+    tune_hold_threshold, tune_value_hold, write_history, write_stream,
 )
 
 from conftest import policy_for, scorers
@@ -185,3 +185,77 @@ def test_train_risk_model_is_deterministic(trained, aml):
     b2, m2 = train_risk_model(aml.X, aml.y, aml.split, neg_sample=0.5, seed=1)
     assert m2["trees"] == trained[1]["trees"]
     np.testing.assert_array_equal(b2.inplace_predict(aml.X), trained[0].inplace_predict(aml.X))
+
+
+# ------------------------------------------------------------------------------ value-aware hold
+def _band():
+    """Hold band (risk >= 0.5) of 10 payments, best first. Laundering is either very risky or very big."""
+    risk = np.array([0.99, 0.95, 0.9, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.4, 0.1])
+    y = np.array([1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0])
+    usd = np.array([1e3, 2e3, 500.0, 300.0, 3e6, 40.0, 60.0, 1e6, 10.0, 5e5, 9e9, 9e9])
+    return y, risk, usd
+
+
+def test_tune_value_hold_picks_the_best_feasible_choice():
+    y, risk, usd = _band()
+    t = tune_value_hold(y, risk, usd, hold_threshold=0.5, min_precision=0.8, keep_usd=0.95)
+    assert t["val_base"] == {"holds": 10, "laundering_held": 5, "laundered_usd_held": 1e3 + 2e3 + 500 + 3e6 + 1e6}
+    pol = Policy(9.0, 0.5, 0.5, t["hold_strict_threshold"], t["hold_min_usd"])
+    held = decisions(risk, np.zeros(len(y)), np.zeros(len(y), bool), pol, usd) == HOLD
+    # strict holds the top 3 (all laundering); the band holds only the two $1M+ payments
+    assert t["hold_strict_threshold"] == 0.9 and t["hold_min_usd"] == 1e6
+    assert list(np.flatnonzero(held)) == [0, 1, 2, 4, 7]
+    assert y[held].mean() == 1.0 and t["val_chosen"]["hold_precision"] == 1.0
+    assert t["val_chosen"]["laundering_held"] == 5 and t["val_chosen"]["holds"] == 5
+    assert t["val_chosen"]["usd_kept_vs_base"] == pytest.approx(1.0)
+
+
+def test_tune_value_hold_constraints_hold_on_the_tuning_data():
+    rng = np.random.default_rng(0)
+    n = 5000
+    risk = rng.random(n)
+    y = (rng.random(n) < risk ** 4).astype(int)
+    usd = 10 ** rng.uniform(1, 7, n) * (1 + 3 * y)
+    base_thr = 0.6
+    t = tune_value_hold(y, risk, usd, base_thr, min_precision=0.7, keep_usd=0.9)
+    assert t["hold_strict_threshold"] is not None and t["feasible_choices"] > 0
+    pol = Policy(9.0, base_thr, base_thr, t["hold_strict_threshold"], t["hold_min_usd"])
+    held = decisions(risk, np.zeros(n), np.zeros(n, bool), pol, usd) == HOLD
+    base = risk >= base_thr
+    assert not (held & ~base).any()                                    # never holds more than today
+    assert y[held].mean() >= 0.7
+    assert usd[held & (y == 1)].sum() >= 0.9 * usd[base & (y == 1)].sum()
+    assert held.sum() == t["val_chosen"]["holds"] and y[held].sum() == t["val_chosen"]["laundering_held"]
+
+
+def test_tune_value_hold_infeasible_keeps_the_plain_policy():
+    y, risk, usd = _band()
+    t = tune_value_hold(y, risk, usd, hold_threshold=0.5, min_precision=1.01)
+    assert t["hold_strict_threshold"] is None and t["hold_min_usd"] is None and t["val_chosen"] is None
+    t = tune_value_hold(y, risk, usd, hold_threshold=2.0)              # nothing in the band
+    assert t["hold_strict_threshold"] is None and t["val_base"]["holds"] == 0
+
+
+def test_tune_value_hold_holding_the_whole_band_is_todays_policy():
+    y = np.array([1, 1, 1, 0])
+    risk = np.array([0.9, 0.8, 0.7, 0.1])
+    t = tune_value_hold(y, risk, np.ones(4), hold_threshold=0.6, min_precision=0.8, keep_usd=1.0)
+    assert t["hold_strict_threshold"] == 0.6                           # strict == hold: plain policy
+
+
+def test_tune_value_hold_respects_tied_scores():
+    y = np.array([1, 1, 0, 0])
+    risk = np.array([0.9, 0.8, 0.8, 0.8])
+    usd = np.array([1.0, 1.0, 1.0, 1.0])
+    t = tune_value_hold(y, risk, usd, hold_threshold=0.8, min_precision=0.9, keep_usd=0.0)
+    # cannot hold only the first 0.8: strict = 0.9 holds payment 0, small amounts in the band are not held
+    pol = Policy(9.0, 0.8, 0.8, t["hold_strict_threshold"], t["hold_min_usd"])
+    held = decisions(risk, np.zeros(4), np.zeros(4, bool), pol, usd) == HOLD
+    assert list(held) == [True, False, False, False]
+
+
+def test_summarise_counts():
+    y = np.array([1, 1, 0, 0, 1, 0])
+    act = np.array([HOLD, WARN, WARN, ALLOW, ALLOW, HOLD])
+    s = summarise(y, act, np.ones(6))
+    assert s["holds"] == 2 and s["laundering_held"] == 1 and s["laundering_warned_or_held"] == 2

@@ -1,0 +1,391 @@
+{
+ "targets": {
+  "min_precision_val": 0.8,
+  "keep_usd_val": 0.95
+ },
+ "old_policy": {
+  "anomaly_threshold": 0.9007520822882663,
+  "warn_threshold": 0.1281326860189438,
+  "hold_threshold": 0.7586358785629272,
+  "hold_min_precision_val": 0.6,
+  "hold_cap": 0.002,
+  "warn_budget": 0.0125
+ },
+ "new_policy": {
+  "anomaly_threshold": 0.9007520822882663,
+  "warn_threshold": 0.1281326860189438,
+  "hold_threshold": 0.7586358785629272,
+  "hold_min_precision_val": 0.6,
+  "hold_cap": 0.002,
+  "warn_budget": 0.0125,
+  "hold_strict_threshold": 0.8520116209983826,
+  "hold_min_usd": 5000.0,
+  "value_hold_min_precision_val": 0.8,
+  "value_hold_keep_usd_val": 0.95
+ },
+ "validation_tuning": {
+  "hold_strict_threshold": 0.8520116209983826,
+  "hold_min_usd": 5000.0,
+  "min_precision": 0.8,
+  "keep_usd": 0.95,
+  "val_base": {
+   "holds": 980,
+   "laundering_held": 588,
+   "laundered_usd_held": 337009653.83930606
+  },
+  "val_chosen": {
+   "holds": 696,
+   "laundering_held": 567,
+   "laundered_usd_held": 336955243.82325506,
+   "hold_precision": 0.8146551724137931,
+   "usd_kept_vs_base": 0.9998385505713824,
+   "strict_holds": 600
+  },
+  "feasible_choices": 7311
+ },
+ "validation_sensitivity": [
+  {
+   "min_precision": 0.7,
+   "keep_usd": 0.9,
+   "hold_strict_threshold": 0.8014182448387146,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 823,
+    "laundering_held": 580,
+    "laundered_usd_held": 336993034.54266053,
+    "hold_precision": 0.7047387606318347,
+    "usd_kept_vs_base": 0.999950685992356,
+    "strict_holds": 769
+   }
+  },
+  {
+   "min_precision": 0.7,
+   "keep_usd": 0.95,
+   "hold_strict_threshold": 0.8014182448387146,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 823,
+    "laundering_held": 580,
+    "laundered_usd_held": 336993034.54266053,
+    "hold_precision": 0.7047387606318347,
+    "usd_kept_vs_base": 0.999950685992356,
+    "strict_holds": 769
+   }
+  },
+  {
+   "min_precision": 0.7,
+   "keep_usd": 0.99,
+   "hold_strict_threshold": 0.8014182448387146,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 823,
+    "laundering_held": 580,
+    "laundered_usd_held": 336993034.54266053,
+    "hold_precision": 0.7047387606318347,
+    "usd_kept_vs_base": 0.999950685992356,
+    "strict_holds": 769
+   }
+  },
+  {
+   "min_precision": 0.75,
+   "keep_usd": 0.9,
+   "hold_strict_threshold": 0.8215078711509705,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 759,
+    "laundering_held": 576,
+    "laundered_usd_held": 336983023.090836,
+    "hold_precision": 0.758893280632411,
+    "usd_kept_vs_base": 0.9999209792711672,
+    "strict_holds": 690
+   }
+  },
+  {
+   "min_precision": 0.75,
+   "keep_usd": 0.95,
+   "hold_strict_threshold": 0.8215078711509705,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 759,
+    "laundering_held": 576,
+    "laundered_usd_held": 336983023.090836,
+    "hold_precision": 0.758893280632411,
+    "usd_kept_vs_base": 0.9999209792711672,
+    "strict_holds": 690
+   }
+  },
+  {
+   "min_precision": 0.75,
+   "keep_usd": 0.99,
+   "hold_strict_threshold": 0.8215078711509705,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 759,
+    "laundering_held": 576,
+    "laundered_usd_held": 336983023.090836,
+    "hold_precision": 0.758893280632411,
+    "usd_kept_vs_base": 0.9999209792711672,
+    "strict_holds": 690
+   }
+  },
+  {
+   "min_precision": 0.8,
+   "keep_usd": 0.9,
+   "hold_strict_threshold": 0.8520116209983826,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 696,
+    "laundering_held": 567,
+    "laundered_usd_held": 336955243.82325506,
+    "hold_precision": 0.8146551724137931,
+    "usd_kept_vs_base": 0.9998385505713824,
+    "strict_holds": 600
+   }
+  },
+  {
+   "min_precision": 0.8,
+   "keep_usd": 0.95,
+   "hold_strict_threshold": 0.8520116209983826,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 696,
+    "laundering_held": 567,
+    "laundered_usd_held": 336955243.82325506,
+    "hold_precision": 0.8146551724137931,
+    "usd_kept_vs_base": 0.9998385505713824,
+    "strict_holds": 600
+   }
+  },
+  {
+   "min_precision": 0.8,
+   "keep_usd": 0.99,
+   "hold_strict_threshold": 0.8520116209983826,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 696,
+    "laundering_held": 567,
+    "laundered_usd_held": 336955243.82325506,
+    "hold_precision": 0.8146551724137931,
+    "usd_kept_vs_base": 0.9998385505713824,
+    "strict_holds": 600
+   }
+  },
+  {
+   "min_precision": 0.85,
+   "keep_usd": 0.9,
+   "hold_strict_threshold": 0.8915711045265198,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 654,
+    "laundering_held": 559,
+    "laundered_usd_held": 336934833.95217586,
+    "hold_precision": 0.8547400611620795,
+    "usd_kept_vs_base": 0.9997779888905917,
+    "strict_holds": 521
+   }
+  },
+  {
+   "min_precision": 0.85,
+   "keep_usd": 0.95,
+   "hold_strict_threshold": 0.8915711045265198,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 654,
+    "laundering_held": 559,
+    "laundered_usd_held": 336934833.95217586,
+    "hold_precision": 0.8547400611620795,
+    "usd_kept_vs_base": 0.9997779888905917,
+    "strict_holds": 521
+   }
+  },
+  {
+   "min_precision": 0.85,
+   "keep_usd": 0.99,
+   "hold_strict_threshold": 0.8915711045265198,
+   "hold_min_usd": 5000.0,
+   "val": {
+    "holds": 654,
+    "laundering_held": 559,
+    "laundered_usd_held": 336934833.95217586,
+    "hold_precision": 0.8547400611620795,
+    "usd_kept_vs_base": 0.9997779888905917,
+    "strict_holds": 521
+   }
+  },
+  {
+   "min_precision": 0.9,
+   "keep_usd": 0.9,
+   "hold_strict_threshold": 0.8995420336723328,
+   "hold_min_usd": 10000.0,
+   "val": {
+    "holds": 590,
+    "laundering_held": 532,
+    "laundered_usd_held": 336754337.0351385,
+    "hold_precision": 0.9016949152542373,
+    "usd_kept_vs_base": 0.9992424050727956,
+    "strict_holds": 509
+   }
+  },
+  {
+   "min_precision": 0.9,
+   "keep_usd": 0.95,
+   "hold_strict_threshold": 0.8995420336723328,
+   "hold_min_usd": 10000.0,
+   "val": {
+    "holds": 590,
+    "laundering_held": 532,
+    "laundered_usd_held": 336754337.0351385,
+    "hold_precision": 0.9016949152542373,
+    "usd_kept_vs_base": 0.9992424050727956,
+    "strict_holds": 509
+   }
+  },
+  {
+   "min_precision": 0.9,
+   "keep_usd": 0.99,
+   "hold_strict_threshold": 0.8995420336723328,
+   "hold_min_usd": 10000.0,
+   "val": {
+    "holds": 590,
+    "laundering_held": 532,
+    "laundered_usd_held": 336754337.0351385,
+    "hold_precision": 0.9016949152542373,
+    "usd_kept_vs_base": 0.9992424050727956,
+    "strict_holds": 509
+   }
+  }
+ ],
+ "decisions": {
+  "val": {
+   "old": {
+    "payments": 965524,
+    "mix": {
+     "ALLOW": 0.9866,
+     "WARN": 0.01238,
+     "HOLD": 0.00101
+    },
+    "hold_precision": 0.6,
+    "warn_precision": 0.02132641967048591,
+    "laundering_recall_hold": 0.5675675675675675,
+    "laundering_recall_warn_or_hold": 0.8137065637065637,
+    "laundered_usd_total": 459714625.7628358,
+    "laundered_usd_held": 337009653.8393061,
+    "holds": 980,
+    "laundering_held": 588,
+    "laundering_warned_or_held": 843,
+    "base_rate": 0.0010729924890525767,
+    "schemes_disrupted": {
+     "BIPARTITE": "9/9",
+     "CYCLE": "21/24",
+     "FAN-IN": "18/20",
+     "FAN-OUT": "18/20",
+     "GATHER-SCATTER": "23/23",
+     "RANDOM": "12/15",
+     "SCATTER-GATHER": "21/21",
+     "STACK": "23/25"
+    },
+    "schemes_disrupted_total": "145/157"
+   },
+   "new": {
+    "payments": 965524,
+    "mix": {
+     "ALLOW": 0.9866,
+     "WARN": 0.01268,
+     "HOLD": 0.00072
+    },
+    "hold_precision": 0.8146551724137931,
+    "warn_precision": 0.02254717751817662,
+    "laundering_recall_hold": 0.5472972972972973,
+    "laundering_recall_warn_or_hold": 0.8137065637065637,
+    "laundered_usd_total": 459714625.7628358,
+    "laundered_usd_held": 336955243.82325524,
+    "holds": 696,
+    "laundering_held": 567,
+    "laundering_warned_or_held": 843,
+    "base_rate": 0.0010729924890525767,
+    "schemes_disrupted": {
+     "BIPARTITE": "8/9",
+     "CYCLE": "21/24",
+     "FAN-IN": "18/20",
+     "FAN-OUT": "18/20",
+     "GATHER-SCATTER": "23/23",
+     "RANDOM": "11/15",
+     "SCATTER-GATHER": "21/21",
+     "STACK": "22/25"
+    },
+    "schemes_disrupted_total": "142/157"
+   }
+  },
+  "test": {
+   "old": {
+    "payments": 862792,
+    "mix": {
+     "ALLOW": 0.98263,
+     "WARN": 0.01628,
+     "HOLD": 0.00108
+    },
+    "hold_precision": 0.5331196581196581,
+    "warn_precision": 0.020284697508896797,
+    "laundering_recall_hold": 0.5219665271966527,
+    "laundering_recall_warn_or_hold": 0.8200836820083682,
+    "laundered_usd_total": 424326853.0596404,
+    "laundered_usd_held": 269326101.9632745,
+    "holds": 936,
+    "laundering_held": 499,
+    "laundering_warned_or_held": 784,
+    "base_rate": 0.0011080306725143488,
+    "schemes_disrupted": {
+     "BIPARTITE": "12/16",
+     "CYCLE": "19/22",
+     "FAN-IN": "16/18",
+     "FAN-OUT": "18/20",
+     "GATHER-SCATTER": "32/37",
+     "RANDOM": "14/17",
+     "SCATTER-GATHER": "19/22",
+     "STACK": "20/22"
+    },
+    "schemes_disrupted_total": "150/174"
+   },
+   "new": {
+    "payments": 862792,
+    "mix": {
+     "ALLOW": 0.98263,
+     "WARN": 0.01663,
+     "HOLD": 0.00074
+    },
+    "hold_precision": 0.7301092043681747,
+    "warn_precision": 0.02202858138724294,
+    "laundering_recall_hold": 0.4895397489539749,
+    "laundering_recall_warn_or_hold": 0.8200836820083682,
+    "laundered_usd_total": 424326853.0596404,
+    "laundered_usd_held": 269243326.73865736,
+    "holds": 641,
+    "laundering_held": 468,
+    "laundering_warned_or_held": 784,
+    "base_rate": 0.0011080306725143488,
+    "schemes_disrupted": {
+     "BIPARTITE": "12/16",
+     "CYCLE": "19/22",
+     "FAN-IN": "16/18",
+     "FAN-OUT": "17/20",
+     "GATHER-SCATTER": "32/37",
+     "RANDOM": "13/17",
+     "SCATTER-GATHER": "18/22",
+     "STACK": "20/22"
+    },
+    "schemes_disrupted_total": "147/174"
+   }
+  }
+ },
+ "old_policy_reproduces_deployed_metrics": true,
+ "reproduction_diffs": {
+  "val": {},
+  "test": {}
+ },
+ "versions": {
+  "xgboost": "3.4.1",
+  "torch": "2.11.0+cpu",
+  "numpy": "2.0.2"
+ },
+ "seconds": 106.9
+}

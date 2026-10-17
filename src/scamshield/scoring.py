@@ -91,7 +91,7 @@ class Engine:
         out = []
         for i, it in enumerate(items):
             f = dict(zip(FEATURES, X[i].tolist()))
-            d = decide(float(err[i]), float(risk[i]), rule_hits(f, self.ctx), self.policy)
+            d = decide(float(err[i]), float(risk[i]), rule_hits(f, self.ctx), self.policy, it.amount_usd)
             res = ScoreResult(d, f, model_ms=model_ms)
             if explain_all or d.action != ALLOW:
                 res.reasons = self.reasons(res, Z[i], R[i], X[i])

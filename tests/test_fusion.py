@@ -124,3 +124,94 @@ def test_repo_policy_file_loads_with_learned_thresholds(tmp_path):
     th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 2.0, "warn_threshold": 0.2, "hold_threshold": 0.9})
     p = Policy.load(repo_policy, th)
     assert p.warn_threshold <= p.hold_threshold
+
+
+# ------------------------------------------------------------------------------ value-aware hold
+VPOL = Policy(anomaly_threshold=1.0, warn_threshold=0.3, hold_threshold=0.8, hold_strict_threshold=0.9,
+              hold_min_usd=20_000)
+
+
+@pytest.mark.parametrize("risk,usd,action", [
+    (0.95, 1.0, HOLD),                         # above strict: held whatever the amount
+    (0.9, 0.0, HOLD),                          # strict threshold inclusive
+    (0.85, 20_000, HOLD),                      # in the band and big enough (amount inclusive)
+    (0.8, 1e9, HOLD),                          # hold threshold still inclusive in the band
+    (0.85, 19_999.99, WARN),                   # in the band but small: warned, not held
+    (0.8, 0.0, WARN),
+    (0.79, 1e9, WARN),                         # below the band: size alone never holds
+    (0.29, 1e9, ALLOW),
+])
+def test_value_aware_decide(risk, usd, action):
+    assert decide(0.0, risk, [], VPOL, usd).action == action
+
+
+def test_value_aware_small_band_payment_with_rule_or_anomaly_is_warned():
+    assert decide(5.0, 0.85, ["big_new_payee"], VPOL, 10.0).action == WARN
+
+
+def test_value_aware_needs_the_amount_only_inside_the_band():
+    assert decide(0, 0.95, [], VPOL).action == HOLD
+    assert decide(0, 0.5, [], VPOL).action == WARN
+    with pytest.raises(ValueError):
+        decide(0, 0.85, [], VPOL)
+    with pytest.raises(ValueError):
+        decisions(np.array([0.85]), np.array([0.0]), np.array([False]), VPOL)
+
+
+def test_plain_policy_ignores_the_amount():
+    assert not POL.value_aware and VPOL.value_aware
+    for usd in (None, 0.0, 1e9):
+        assert decide(0, 0.8, [], POL, usd).action == HOLD and decide(0, 0.79, [], POL, usd).action == WARN
+
+
+def test_strict_equal_to_hold_is_the_plain_policy():
+    p = Policy(1.0, 0.3, 0.8, hold_strict_threshold=0.8, hold_min_usd=1e12)
+    for risk in (0.0, 0.3, 0.79, 0.8, 0.95):
+        assert decide(0, risk, [], p, 1.0).action == decide(0, risk, [], POL).action
+
+
+def test_value_aware_policy_validation():
+    with pytest.raises(ValueError):
+        Policy(1.0, 0.3, 0.8, hold_strict_threshold=0.9)             # amount missing
+    with pytest.raises(ValueError):
+        Policy(1.0, 0.3, 0.8, hold_min_usd=1000)                     # strict missing
+    with pytest.raises(ValueError):
+        Policy(1.0, 0.3, 0.8, hold_strict_threshold=0.7, hold_min_usd=1000)
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_vectorised_value_aware_decisions_equal_decide(seed):
+    rng = np.random.default_rng(seed)
+    w, h, s = sorted(rng.random(3))
+    pol = Policy(float(rng.random() * 2), float(w), float(h), float(s), float(rng.choice([10.0, 1e3, 1e5])))
+    n = 2000
+    r, a, ru = rng.random(n), rng.random(n) * 2, rng.random(n) < 0.1
+    usd = 10 ** rng.uniform(0, 7, n)
+    r[:20], usd[:20] = h, pol.hold_min_usd                             # exact edges
+    r[20:40] = s
+    vec = decisions(r, a, ru, pol, usd)
+    assert all(v == decide(float(ai), float(ri), ["x"] if ui else [], pol, float(ui_usd)).action
+               for v, ri, ai, ui, ui_usd in zip(vec, r, a, ru, usd))
+    assert {HOLD, WARN} <= set(vec[(r >= h) & (r < s)])
+
+
+def test_policy_load_value_aware_from_learned_and_manual(tmp_path):
+    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 2.0, "warn_threshold": 0.2, "hold_threshold": 0.7,
+                                              "hold_strict_threshold": 0.85, "hold_min_usd": 20000})
+    nulls = {"anomaly_threshold": None, "warn_threshold": None, "hold_threshold": None,
+             "hold_strict_threshold": None, "hold_min_usd": None}
+    assert Policy.load(write(tmp_path / "p1.json", nulls), th) == Policy(2.0, 0.2, 0.7, 0.85, 20000.0)
+    p2 = write(tmp_path / "p2.json", {**nulls, "hold_min_usd": "50000"})
+    assert Policy.load(p2, th).hold_min_usd == 50000.0
+    # switching it off by hand: strict = hold
+    p3 = write(tmp_path / "p3.json", {**nulls, "hold_strict_threshold": 0.7})
+    assert Policy.load(p3, th).hold_strict_threshold == 0.7
+    # a hand-set hold threshold above the learned strict one lifts strict with it
+    p4 = write(tmp_path / "p4.json", {**nulls, "hold_threshold": 0.95})
+    assert Policy.load(p4, th) == Policy(2.0, 0.2, 0.95, 0.95, 20000.0)
+
+
+def test_policy_load_old_thresholds_file_is_plain(tmp_path):
+    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 2.0, "warn_threshold": 0.2, "hold_threshold": 0.9})
+    pol = write(tmp_path / "policy.json", {"hold_strict_threshold": None, "hold_min_usd": None})
+    assert not Policy.load(pol, th).value_aware

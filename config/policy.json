@@ -1,6 +1,8 @@
 {
-  "_comment": "Hand-set policy. null = use the learned value from shared/models/thresholds.json.",
+  "_comment": "Hand-set policy. null = use the learned value from shared/models/thresholds.json. Value-aware hold: risk >= hold_strict_threshold, or risk >= hold_threshold and USD amount >= hold_min_usd; set hold_strict_threshold equal to hold_threshold to switch it off.",
   "anomaly_threshold": null,
   "warn_threshold": null,
-  "hold_threshold": null
+  "hold_threshold": null,
+  "hold_strict_threshold": null,
+  "hold_min_usd": null
 }

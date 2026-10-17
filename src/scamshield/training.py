@@ -132,9 +132,15 @@ def rule_matrix(X: np.ndarray, ctx: FeatureContext) -> np.ndarray:
         (f["s_amount_vs_usual"] >= np.log(ctx.rule_big_new_payee_ratio))
 
 
-def decisions(risk: np.ndarray, anomaly: np.ndarray, rules: np.ndarray, pol: Policy) -> np.ndarray:
+def decisions(risk: np.ndarray, anomaly: np.ndarray, rules: np.ndarray, pol: Policy,
+              usd: np.ndarray | None = None) -> np.ndarray:
     """Vectorised fusion.decide (tests check they agree)."""
-    hold = risk >= pol.hold_threshold
+    if pol.value_aware:
+        if usd is None:
+            raise ValueError("a value-aware policy needs the payments' USD amounts")
+        hold = (risk >= pol.hold_strict_threshold) | ((risk >= pol.hold_threshold) & (usd >= pol.hold_min_usd))
+    else:
+        hold = risk >= pol.hold_threshold
     warn = ~hold & ((risk >= pol.warn_threshold) | (anomaly >= pol.anomaly_threshold) | rules)
     return np.where(hold, HOLD, np.where(warn, WARN, ALLOW))
 
@@ -155,6 +161,65 @@ def tune_hold_threshold(y: np.ndarray, risk: np.ndarray, min_precision: float = 
     return float(r[kmax])
 
 
+# candidate minimum amounts for the value-aware hold: a coarse 1-2-5 grid, so the choice cannot be fitted
+# to individual validation payments
+HOLD_AMOUNT_GRID = (1e3, 2e3, 5e3, 1e4, 2e4, 5e4, 1e5, 2e5, 5e5, 1e6, 2e6, 5e6, 1e7)
+
+
+def tune_value_hold(y: np.ndarray, risk: np.ndarray, usd: np.ndarray, hold_threshold: float,
+                    min_precision: float = 0.8, keep_usd: float = 0.95,
+                    amounts: tuple[float, ...] = HOLD_AMOUNT_GRID) -> dict:
+    """Pick (hold_strict_threshold, hold_min_usd) on VALIDATION payments.
+
+    Hold if risk >= strict, or if hold_threshold <= risk < strict and usd >= min_usd. The held set is a subset
+    of today's (risk >= hold_threshold), so the volume cap still holds. Among choices with hold precision
+    >= min_precision that keep >= keep_usd of the laundered USD today's policy pauses, take the one holding
+    the most laundering payments; ties -> fewer holds, then the larger minimum amount, then the higher strict
+    threshold. Returns both settings as None (plain policy) if nothing qualifies.
+    """
+    y, risk, usd = np.asarray(y), np.asarray(risk, dtype=np.float64), np.asarray(usd, dtype=np.float64)
+    band = risk >= hold_threshold
+    order = np.argsort(-risk[band], kind="mergesort")
+    r, yy, uu = risk[band][order], y[band][order].astype(np.int64), usd[band][order]
+    n = len(r)
+    base = {"holds": int(n), "laundering_held": int(yy.sum()), "laundered_usd_held": float((uu * yy).sum())}
+    out = {"hold_strict_threshold": None, "hold_min_usd": None, "min_precision": min_precision,
+           "keep_usd": keep_usd, "val_base": base, "val_chosen": None, "feasible_choices": 0}
+    if n == 0:
+        return out
+    # strict set = the first k payments (k = 0 .. n); only ends of tied runs are achievable cut points
+    ks = np.r_[0, np.flatnonzero(np.r_[r[1:] != r[:-1], True]) + 1]
+    pre_tp = np.r_[0, np.cumsum(yy)]
+    pre_usd = np.r_[0.0, np.cumsum(uu * yy)]
+
+    def suffix(v):  # suffix[k] = sum of v[k:]
+        return np.r_[np.cumsum(v[::-1])[::-1], 0]
+
+    best, best_key, feasible = None, None, 0
+    for a in amounts:
+        m = uu >= a
+        cnt = ks + suffix(m.astype(np.int64))[ks]
+        tp = pre_tp[ks] + suffix((m & (yy == 1)).astype(np.int64))[ks]
+        lusd = pre_usd[ks] + suffix(np.where(m, uu * yy, 0.0))[ks]
+        ok = (cnt > 0) & (tp >= min_precision * np.maximum(cnt, 1)) & (lusd >= keep_usd * base["laundered_usd_held"])
+        feasible += int(ok.sum())
+        for j in np.flatnonzero(ok):
+            key = (int(tp[j]), -int(cnt[j]), a, -int(ks[j]))
+            if best_key is None or key > best_key:
+                best_key, best = key, (int(ks[j]), a, int(cnt[j]), int(tp[j]), float(lusd[j]))
+    out["feasible_choices"] = feasible
+    if best is None:
+        return out
+    k, a, cnt, tp, lusd = best
+    # k == n: every payment in the band is held on risk alone, i.e. today's policy
+    strict = float(r[k - 1]) if 0 < k < n else (float(hold_threshold) if k == n else float(r[0]) + 1e-9)
+    out.update(hold_strict_threshold=strict, hold_min_usd=float(a),
+               val_chosen={"holds": cnt, "laundering_held": tp, "laundered_usd_held": lusd,
+                           "hold_precision": tp / cnt, "usd_kept_vs_base": lusd / max(base["laundered_usd_held"], 1e-12),
+                           "strict_holds": k})
+    return out
+
+
 def summarise(y: np.ndarray, action: np.ndarray, usd: np.ndarray, patterns_hit: pd.DataFrame | None = None) -> dict:
     held, warned = action == HOLD, action == WARN
     flagged = held | warned
@@ -167,6 +232,9 @@ def summarise(y: np.ndarray, action: np.ndarray, usd: np.ndarray, patterns_hit: 
         "laundering_recall_warn_or_hold": float(y[flagged].sum() / max(y.sum(), 1)),
         "laundered_usd_total": float(usd[y == 1].sum()),
         "laundered_usd_held": float(usd[(y == 1) & held].sum()),
+        "holds": int(held.sum()),
+        "laundering_held": int(y[held].sum()),
+        "laundering_warned_or_held": int(y[flagged].sum()),
         "base_rate": float(y.mean()),
     }
     if patterns_hit is not None and len(patterns_hit):
@@ -211,7 +279,8 @@ def write_stream(tx: pd.DataFrame, split: np.ndarray, out_dir: Path) -> Path:
 
 # ------------------------------------------------------------------------------ CLI
 def run(raw: Path, models: Path, data_dir: Path, epochs: int, seed: int, hold_precision: float, hold_cap: float,
-        warn_budget: float, anomaly_quantile: float) -> dict:
+        warn_budget: float, anomaly_quantile: float, value_hold_precision: float | None = 0.8,
+        value_hold_keep_usd: float = 0.95) -> dict:
     import torch
     import xgboost as xgb
 
@@ -256,21 +325,27 @@ def run(raw: Path, models: Path, data_dir: Path, epochs: int, seed: int, hold_pr
     cand = np.sort(risk[va][~other_warns & (risk[va] < hold_threshold)])[::-1]
     k = int(budget_left * va.sum())
     warn_threshold = float(cand[k]) if 0 < k < len(cand) else hold_threshold
-    pol = Policy(anomaly_threshold=anomaly_threshold, warn_threshold=warn_threshold, hold_threshold=hold_threshold)
+    value_hold = (tune_value_hold(y[va], risk[va], usd[va], hold_threshold, value_hold_precision, value_hold_keep_usd)
+                  if value_hold_precision else {"hold_strict_threshold": None, "hold_min_usd": None})
+    pol = Policy(anomaly_threshold=anomaly_threshold, warn_threshold=warn_threshold, hold_threshold=hold_threshold,
+                 hold_strict_threshold=value_hold["hold_strict_threshold"], hold_min_usd=value_hold["hold_min_usd"])
     thresholds = {"anomaly_threshold": anomaly_threshold, "warn_threshold": warn_threshold,
-                  "hold_threshold": hold_threshold, "hold_min_precision_val": hold_precision,
-                  "hold_cap": hold_cap, "warn_budget": warn_budget}
+                  "hold_threshold": hold_threshold, "hold_strict_threshold": pol.hold_strict_threshold,
+                  "hold_min_usd": pol.hold_min_usd, "hold_min_precision_val": hold_precision,
+                  "hold_cap": hold_cap, "warn_budget": warn_budget,
+                  "value_hold_min_precision_val": value_hold_precision, "value_hold_keep_usd_val": value_hold_keep_usd}
     art.thresholds.write_text(json.dumps(thresholds, indent=1))
 
     # decisions per period + per-scheme disruption
     res = {}
     for name, m in (("val", va), ("test", te)):
-        act = decisions(risk[m], anomaly[m], rules[m], pol)
+        act = decisions(risk[m], anomaly[m], rules[m], pol, usd[m])
         res[name] = summarise(y[m], act, usd[m], scheme_hits(tx, m, act, raw))
-    # sanity: vectorised fusion == fusion.decide on a sample
-    for i in np.flatnonzero(te)[:2000]:
-        d = decide(float(anomaly[i]), float(risk[i]), ["x"] if rules[i] else [], pol).action
-        assert d == decisions(risk[i:i + 1], anomaly[i:i + 1], rules[i:i + 1], pol)[0]
+    # sanity: vectorised fusion == fusion.decide on a sample (plus every test payment in the hold band)
+    sample = np.union1d(np.flatnonzero(te)[:2000], np.flatnonzero(te & (risk >= hold_threshold)))
+    for i in sample:
+        d = decide(float(anomaly[i]), float(risk[i]), ["x"] if rules[i] else [], pol, float(usd[i])).action
+        assert d == decisions(risk[i:i + 1], anomaly[i:i + 1], rules[i:i + 1], pol, usd[i:i + 1])[0]
 
     stream = write_stream(tx, split, data_dir)
     write_history(tx, split, data_dir)
@@ -287,6 +362,7 @@ def run(raw: Path, models: Path, data_dir: Path, epochs: int, seed: int, hold_pr
                         "flag_rate_test": float((anomaly[te] >= anomaly_threshold).mean())},
         "rules": {"fire_rate_test": float(rules[te].mean()), "precision_test": float(y[te][rules[te]].mean())},
         "thresholds": thresholds,
+        "value_hold_tuning_val": value_hold,
         "decisions": res,
         "versions": {"xgboost": xgb.__version__, "torch": torch.__version__, "numpy": np.__version__,
                      "pandas": pd.__version__},
@@ -295,8 +371,8 @@ def run(raw: Path, models: Path, data_dir: Path, epochs: int, seed: int, hold_pr
     }
     art.metrics.write_text(json.dumps(metrics, indent=1, default=str))
     out = tx.loc[te, ["ts", "sender", "receiver", "amount_paid", "currency_paid", "payment_format", "label"]].copy()
-    out["risk"], out["anomaly"], out["rules"] = risk[te], anomaly[te], rules[te]
-    out["action"] = decisions(risk[te], anomaly[te], rules[te], pol)
+    out["usd"], out["risk"], out["anomaly"], out["rules"] = usd[te], risk[te], anomaly[te], rules[te]
+    out["action"] = decisions(risk[te], anomaly[te], rules[te], pol, usd[te])
     out.to_csv(data_dir / "test_decisions.csv", index=False)
     return metrics
 
@@ -312,10 +388,14 @@ def main() -> None:
     ap.add_argument("--hold-cap", type=float, default=0.002)
     ap.add_argument("--warn-budget", type=float, default=0.0125)
     ap.add_argument("--anomaly-quantile", type=float, default=0.999)
+    ap.add_argument("--value-hold-precision", type=float, default=0.8,
+                    help="value-aware hold: min validation hold precision (0 = plain risk >= hold_threshold)")
+    ap.add_argument("--value-hold-keep-usd", type=float, default=0.95,
+                    help="value-aware hold: min share of today's paused laundered USD to keep on validation")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     m = run(a.raw, a.models, a.data, a.epochs, a.seed, a.hold_precision, a.hold_cap, a.warn_budget,
-            a.anomaly_quantile)
+            a.anomaly_quantile, a.value_hold_precision, a.value_hold_keep_usd)
     print(json.dumps({k: m[k] for k in ("risk_model", "thresholds", "decisions", "seconds")}, indent=1, default=str))
 
 

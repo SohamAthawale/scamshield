@@ -1,0 +1,12 @@
+{
+ "anomaly_threshold": 0.9007520822882663,
+ "warn_threshold": 0.1281326860189438,
+ "hold_threshold": 0.7586358785629272,
+ "hold_min_precision_val": 0.6,
+ "hold_cap": 0.002,
+ "warn_budget": 0.0125,
+ "hold_strict_threshold": 0.8520116209983826,
+ "hold_min_usd": 5000.0,
+ "value_hold_min_precision_val": 0.8,
+ "value_hold_keep_usd_val": 0.95
+}
