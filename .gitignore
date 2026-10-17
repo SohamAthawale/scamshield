@@ -1,0 +1,20 @@
+# data, models and secrets never go in git
+shared/data/
+shared/models/
+*.gguf
+*.pem
+*.key
+.env
+secrets/
+kaggle.json
+*.db
+*.db-wal
+*.db-shm
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+# os
+.DS_Store

@@ -1,0 +1,8 @@
+# torch_nnpa smoke benchmark, 19-12-6-12-19 MLP, run in L1CC Jupyter image on z17 (machine type 9175), Sat Oct 17 00:18:39 UTC 2026
+available True telum2 True
+device nnpa:0 <class 'torch.device'>
+bs=1 cpu p50=32.4us p99=53.1us | nnpa p50=38.9us p99=61.1us | maxdiff=3.92e-04
+bs=32 cpu p50=38.0us p99=58.9us | nnpa p50=40.3us p99=56.7us | maxdiff=7.01e-04
+bs=256 cpu p50=70.0us p99=112.6us | nnpa p50=59.3us p99=86.1us | maxdiff=8.32e-04
+bs=4096 cpu p50=608.5us p99=1091.9us | nnpa p50=311.2us p99=684.2us | maxdiff=1.12e-03
+to('nnpa'): nnpa:0
