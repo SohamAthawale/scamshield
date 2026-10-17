@@ -1,9 +1,10 @@
-# PYTHONPATH=src python -m pytest -q tests, run on the z17 VM in the scamshield-app image (pytest installed into a throwaway --target dir), branch with the value-aware hold
-# The 2 failures are existing tests that assume NNPA is ABSENT (laptop); on z17 torch_nnpa loads, so 'auto'/'nnpa' pick NNPA instead of torch_cpu. Unrelated to the hold policy.
+# PYTHONPATH=src python -m pytest -q -rs tests, on the z17 VM in the scamshield-app image (pytest installed into a throwaway --target dir)
+# 357 = 355 portable tests + 2 that need a real Telum NNPA (tests/test_models.py::test_nnpa_backend_on_telum[auto|nnpa]); the laptop skips those 2.
 
-
-tests/test_models.py:97: AssertionError
-=========================== short test summary info ============================
-FAILED tests/test_models.py::test_auto_backend_falls_back_to_torch_cpu_without_nnpa
-FAILED tests/test_models.py::test_nnpa_backend_falls_back_too - AssertionErro...
-2 failed, 353 passed, 5 deselected in 24.72s
+........................................................................ [ 80%]
+.....................................................................    [100%]
+357 passed, 5 deselected in 24.51s
+s390x
+Type:                 9175
+nnpa
+Sat Oct 17 11:31:48 AM UTC 2026

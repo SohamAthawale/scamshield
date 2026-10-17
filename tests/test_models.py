@@ -1,5 +1,6 @@
 """models.py, inference/anomaly.py and inference/risk.py on tiny artifacts built in conftest."""
 import logging
+import sys
 
 import numpy as np
 import pytest
@@ -86,15 +87,40 @@ def test_numpy_forward_equals_torch():
 
 
 # ------------------------------------------------------------------------------ anomaly backends
-def test_auto_backend_falls_back_to_torch_cpu_without_nnpa(models_dir, caplog):
+def nnpa_available() -> bool:
+    try:
+        import torch  # noqa: F401  torch first: it auto-loads torch_nnpa; importing torch_nnpa first breaks torch
+        import torch_nnpa
+        return bool(torch_nnpa.NNPAModule.is_available())
+    except Exception:
+        return False
+
+
+@pytest.fixture
+def no_nnpa(monkeypatch):
+    """Make 'import torch_nnpa' fail, so the fallback path is tested on Telum machines too."""
+    monkeypatch.setitem(sys.modules, "torch_nnpa", None)
+
+
+def test_auto_backend_falls_back_to_torch_cpu_without_nnpa(models_dir, caplog, no_nnpa):
     with caplog.at_level(logging.WARNING, logger="scamshield.inference.anomaly"):
         s = load_anomaly_scorer(models_dir, backend="auto")
     assert s.name == "torch_cpu"
     assert any("nnpa" in r.getMessage() for r in caplog.records)
 
 
-def test_nnpa_backend_falls_back_too(models_dir):
+def test_nnpa_backend_falls_back_too(models_dir, no_nnpa):
     assert load_anomaly_scorer(models_dir, backend="nnpa").name == "torch_cpu"
+
+
+@pytest.mark.skipif(not nnpa_available(), reason="needs a Telum NNPA (IBM z16/z17) with torch_nnpa")
+@pytest.mark.parametrize("backend", ["auto", "nnpa"])
+def test_nnpa_backend_on_telum(models_dir, backend):
+    s = load_anomaly_scorer(models_dir, backend=backend)
+    assert s.name == "torch_nnpa" and s.nnpa_model is not None
+    Z = np.random.default_rng(0).normal(size=(64, len(ANOMALY_FEATURES))).astype(np.float32)
+    # NNPA computes in reduced precision internally, so compare loosely with the CPU model
+    np.testing.assert_allclose(s.reconstruct(Z, force="nnpa"), s.reconstruct(Z, force="cpu"), atol=5e-2)
 
 
 def test_cpu_backend(models_dir):
