@@ -7,7 +7,8 @@ const ReactDOMServer = require("react-dom/server");
 const sharp = require("sharp");
 const fa = require("react-icons/fa");
 
-const [OUT, CHART, SKILL] = process.argv.slice(2);
+const [OUT, CHART, SKILL, CLIPS, COVERS] = process.argv.slice(2);
+const fs = require("fs");
 const { applyTheme } = require(path.join(SKILL, "scripts/apply_theme.js"));
 
 const HEX = {
@@ -71,6 +72,13 @@ function card(slide, x, y, w, h, name, fill = C.background1) {
 }
 function text(slide, t, o) {
   slide.addText(t, { isTextBox: true, margin: 0, valign: "top", fontSize: 16, color: C.text2, ...o });
+}
+function videoSlide(section, clip, note) {
+  const s = pres.addSlide({ masterName: "Dark", sectionTitle: section });
+  const cover = "data:image/png;base64," + fs.readFileSync(path.join(COVERS, `cover_${clip}.png`)).toString("base64");
+  s.addMedia({ type: "video", path: path.join(CLIPS, `${clip}.mp4`), x: 0, y: 0, w: W, h: 7.5, cover, objectName: `clip ${clip}` });
+  s.addNotes(note);
+  return s;
 }
 function notes(time, body) {
   return `TIME ${time}\n\n${body.trim()}\n`;
@@ -222,19 +230,17 @@ And warnings never block."
   text(s, "Docker Compose · every container built FROM the official L1CC image · non-root · read-only FS · API only on 127.0.0.1 · IBM z17 (type 9175), 3 vCPU, 8 GB",
     { x: M + 0.35, y: 6.0, w: CW - 0.7, h: 0.62, fontSize: 13, color: C.background2, valign: "middle" });
   s.addText("Frameworks: PyTorch 2.11 + torch_nnpa 1.5 · XGBoost 3.4.1 · llama_cpp_python 0.3.36 (zDNN)", { placeholder: "source" });
-  s.addNotes(notes("1:05–1:35", `
-SAY (on this slide):
+  s.addNotes(notes("1:05–1:25", `
+SAY:
 "Account numbers become keyed tokens the moment a payment arrives. One streaming feature engine reads the payer's and the receiving account's history, which is where mule behaviour shows. A PyTorch autoencoder asks: is this unusual for this customer? XGBoost scores mule risk, and IBM Granite writes the analyst's brief, off the hot path."
-
-DO: Switch to the VM terminal. Run, one at a time:
-  uname -m
-  grep Type /proc/sysinfo
-  lscpu | grep -io nnpa
-  docker compose ps
-
-SAY (while they print):
-"This is the real machine: machine type 9175, a z17, with the NNPA flag for the Telum II accelerator, and our containers built from the official LinuxONE image."
 `));
+  videoSlide("How", "04_vm_terminal", notes("1:25–1:40  VIDEO (16 s)", `
+DO: Click the video to play it.
+
+SAY (while the commands print):
+"This is the real machine: s390x, machine type 9175, a z17, with the NNPA flag for the Telum II accelerator, and our containers running."
+`));
+
 
   // ================================================================== 5 live demo divider
   s = pres.addSlide({ masterName: "Dark", sectionTitle: "How" });
@@ -253,27 +259,26 @@ SAY (while they print):
     text(s, b, { x: x + 0.35, y: y + 1.05, w: w - 0.7, h: 0.7, fontSize: 15, color: C.accent5 });
   });
   s.addText("Dashboard over an SSH tunnel · every payment scored before it moves", { placeholder: "source" });
-  s.addNotes(notes("1:35–3:05  (live demo: analyst, then customer)", `
-DO: Switch to the ANALYST browser window.
-
+  s.addNotes(notes("1:40–1:45", `
 SAY:
-"This is the analyst dashboard. Payments stream in at about four milliseconds each, and every one is checked. Single payments run on the CPU, which is faster for small batches."
-
-DO: Click a PAUSED payment to open it.
-
-SAY:
-"This one is paused: a first ACH payment to this payee, with its main risk drivers. Opening it wrote an audit entry. IBM Granite, running here on LinuxONE, wrote this brief from pseudonymised facts only, and it says plainly it's not a finding of fraud."
-
-DO: Click "Customer confirmed: release" (or "Scam confirmed: stop payment"). Point at the mule watchlist.
-
-SAY:
-"The analyst makes the call. And this watchlist ranks receiving accounts that look like mules."
-
-DO: Switch to the CUSTOMER browser window.
-
-SAY:
-"The customer only sees their own payments, and an instant, specific message: your first payment to this payee, much larger than usual, so check them through a contact you already trust. No scores, no accusations; they decide."
+"Here's the live system, with three views of the same stream."
 `));
+  videoSlide("How", "05_analyst_then_customer", notes("1:45–2:40  VIDEO (52 s)", `
+DO: Click the video to play it. Talk over it in this order.
+
+[analyst dashboard, first ~12 s]
+SAY: "This is the analyst dashboard. Payments stream in at about four milliseconds each, and every one is checked. Single payments run on the CPU, which is faster for small batches."
+
+[a paused payment opens, ~12–25 s]
+SAY: "This one is paused: a first ACH payment to this payee, with its main risk drivers. Opening it wrote an audit entry. IBM Granite rewrites this brief in the background, from pseudonymised facts only, and it always says it's not a finding of fraud. The analyst makes the call, and releases it."
+
+[mule watchlist, ~25–35 s]
+SAY: "This watchlist ranks receiving accounts that look like mules."
+
+[customer view, last ~12 s]
+SAY: "And when this customer makes a big first payment to a new payee, they see an instant, specific message. No scores, no accusations; they decide."
+`));
+
 
   // ================================================================== 6 security
   pres.addSection({ title: "Trust" });
@@ -298,21 +303,17 @@ SAY:
     { text: "quantum-safe signatures (the host OpenSSL 3.0.13 has no ML-DSA)." }],
     { x: M + 0.3, y: 5.93, w: CW - 0.6, h: 0.7, fontSize: 14, valign: "middle" });
   s.addText("docs/SECURITY.md · tests/test_security.py, test_audit.py, test_api.py", { placeholder: "source" });
-  s.addNotes(notes("3:05–3:40  (live: auditor view + tamper test)", `
-DO: Switch to the AUDITOR browser window. Click "Verify audit chain".
-
+  s.addNotes(notes("2:40–2:55", `
 SAY:
-"Security is in the core. Every decision, login and case view is hash-chained. Verify: intact."
-
-DO: In the VM terminal (in ~/scamshield), paste and run the tamper command:
-  docker compose exec api python -c "import sqlite3; c=sqlite3.connect('/data/scamshield.db'); c.execute('DROP TRIGGER audit_no_update'); c.execute(\\"UPDATE audit SET details='{}' WHERE id=50\\"); c.commit()"
-Then click "Verify audit chain" again.
-
-SAY:
-"Now I edit one row directly in the database, going around the protections. Verify again: broken, at that exact entry.
-
-Account numbers are pseudonymised on arrival, payloads are AES-256-GCM encrypted on the z17's CPACF crypto, and each role only sees what it needs."
+"Security is in the core. Account numbers are pseudonymised on arrival, payloads are AES-256-GCM encrypted on the z17's CPACF crypto, and each role only sees what it needs."
 `));
+  videoSlide("Trust", "06_auditor_tamper", notes("2:55–3:15  VIDEO (21 s)", `
+DO: Click the video to play it.
+
+SAY:
+"Every decision, login and case view is hash-chained. Verify: intact, nearly six thousand entries. Now we edit one row directly in the database, going around the protections. Verify again: broken, at that exact entry."
+`));
+
 
   // ================================================================== 7 results
   pres.addSection({ title: "Results" });
@@ -335,7 +336,7 @@ Account numbers are pseudonymised on arrival, payloads are AES-256-GCM encrypted
     { x: M, y: 5.85, w: CW, h: 0.8, fontSize: 15 });
   s.addText("z17 VM · test days 9–10 Sep, 862,792 payments · docs/MODEL_CARD.md, docs/evidence/value_hold, docs/evidence/claims",
     { placeholder: "source" });
-  s.addNotes(notes("3:40–4:00", `
+  s.addNotes(notes("3:15–3:35", `
 SAY:
 "So, the results. On two unseen days, 862,000 payments, we paused fewer than one payment in a thousand, and three in four of those were laundering. 147 of 174 laundering schemes were broken, and 82 percent of laundering payments were warned or paused.
 
@@ -366,18 +367,19 @@ IF ASKED (don't read on camera): borderline payments are only paused from $5,000
     });
   s.addText("z17 VM, PyTorch 2.11 + torch_nnpa 1.5 · docs/evidence/bench (bench_autoencoder.csv, bulk_file_nnpa_vs_cpu.txt)",
     { placeholder: "source" });
-  s.addNotes(notes("4:00–4:20  (live: bulk file)", `
-DO: In the VM terminal, run the prepared bulk-file command (DEMO_SCRIPT step 6):
-  docker compose --profile demo run --rm --no-deps simulator python -m scamshield.simulator --url http://api:8000 --offset 88000 --limit 4096 --rate 0 --concurrency 1 --inject 0 --file-size 2048
-Then show the analyst dashboard's "On Telum II NNPA" tile.
+  s.addNotes(notes("3:35–3:50", `
+SAY:
+"On the Telum II, our model is 1.2 times faster than the CPU at 1,024 payments per call and 1.4 times at 4,096. Below about 256 the CPU wins, so single real-time payments stay on the CPU."
+`));
+  videoSlide("Results", "08_bulk_file_nnpa", notes("3:50–4:15  VIDEO (25 s)", `
+DO: Click the video to play it. Point at the "On Telum II NNPA" tile.
 
 SAY:
-"Banks also receive bulk payment files. A 2,048-payment file is scored in one call, and the tile jumps: those payments ran on the Telum II, where our model is up to 1.4 times faster than the CPU.
+"Banks also receive bulk payment files. Two 2,048-payment files are each scored in one call, and the tile jumps: those 4,096 payments ran on the Telum II.
 
-End to end, honestly, that gain is lost in the rest of the pipeline. So moving the tree model onto the accelerator is our next step."
-
-DON'T claim the whole service is accelerated, or that NNPA speeds up single payments.
+End to end, honestly, that gain is lost in the rest of the pipeline, so moving the tree model onto the accelerator is our next step."
 `));
+
 
   // ================================================================== 9 responsible
   pres.addSection({ title: "Responsible AI" });
@@ -428,7 +430,7 @@ DON'T claim the whole service is accelerated, or that NNPA speeds up single paym
     });
   s.addText("No demographics in the data, so fairness is audited by proxy · docs/MODEL_CARD.md, docs/evidence/claims",
     { placeholder: "source" });
-  s.addNotes(notes("4:20–4:45", `
+  s.addNotes(notes("4:15–4:40", `
 SAY:
 "Warnings never block, and every hold reaches a human. Every decision carries its reasons.
 
@@ -463,7 +465,7 @@ And one limit: in this data, a victim's payment looks like an honest large first
     text(s, r, { x, y: y + 0.65, w, h: 0.6, fontSize: 15, color: HEX.soft });
   });
   s.addText("All code written during the IBM Z Datathon 2026 (Oct 17–18) · public data, open-source libraries", { placeholder: "source" });
-  s.addNotes(notes("4:45–5:00", `
+  s.addNotes(notes("4:40–5:00", `
 SAY:
 "ScamShield checks every payment before it leaves and breaks the mule chain early. Customers get a clear warning, and analysts spend their time where three in four cases are real.
 
