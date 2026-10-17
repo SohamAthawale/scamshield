@@ -7,8 +7,8 @@ import stat
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from claimsense import security
-from claimsense.security import (
+from scamshield import security
+from scamshield.security import (
     SECRET_FILES, TOKEN_PREFIX, Envelope, Pseudonymizer, Sealed, generate_secrets, hash_password, load_keyring,
     read_secret, verify_password,
 )
@@ -38,10 +38,11 @@ def test_pseudonymizer_different_keys_give_different_tokens():
 
 def test_pseudonymizer_token_shape_and_no_leak():
     p = Pseudonymizer(KEY_A)
-    t = p.token("physician", "PHY390922")
-    assert t.startswith("D") and len(t) == 17 and set(t[1:]) <= B32
-    assert "390922" not in t and "PHY" not in t
-    assert len(Pseudonymizer(KEY_A, length=8).token("claim", "CLM1")) == 9
+    t = p.token("account", "0119:8000E0380")
+    assert t.startswith("A") and len(t) == 17 and set(t[1:]) <= B32
+    assert "8000E0380" not in t and "0119" not in t
+    assert p.token("payment", "T1").startswith("T")
+    assert len(Pseudonymizer(KEY_A, length=8).token("payment", "T1")) == 9
     assert p.token("weird-kind", "x").startswith("X")
 
 
@@ -226,7 +227,7 @@ def test_load_keyring_with_rotated_keys(tmp_path):
 def test_read_secret_strips_whitespace_and_uses_env_dir(tmp_path, monkeypatch):
     (tmp_path / "jwt_secret").write_text("  abc123\n")
     assert read_secret("jwt_secret", tmp_path) == "abc123"
-    monkeypatch.setenv("CLAIMSENSE_SECRETS", str(tmp_path))
+    monkeypatch.setenv("SCAMSHIELD_SECRETS", str(tmp_path))
     assert security.secrets_dir() == tmp_path
     assert read_secret("jwt_secret") == "abc123"
     with pytest.raises(KeyError):
@@ -234,5 +235,37 @@ def test_read_secret_strips_whitespace_and_uses_env_dir(tmp_path, monkeypatch):
 
 
 def test_secrets_dir_default(monkeypatch):
-    monkeypatch.delenv("CLAIMSENSE_SECRETS", raising=False)
+    monkeypatch.delenv("SCAMSHIELD_SECRETS", raising=False)
     assert str(security.secrets_dir()) == "/run/secrets"
+
+
+def test_account_and_payment_tokens():
+    p = Pseudonymizer(KEY_A)
+    acct = p.token("account", "0119:8C0FFEE01")
+    pay = p.token("payment", "T17")
+    assert acct != p.token("payment", "0119:8C0FFEE01")             # kinds are separated by the HMAC input
+    assert "8C0FFEE01" not in acct and "0119" not in acct and acct == p.token("account", "0119:8C0FFEE01")
+    assert len(acct) == len(pay) == 17
+    assert acct != p.token("account", "119:8C0FFEE01")               # bank codes keep their leading zeros
+
+
+def test_make_secrets_script_writes_customer_account(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "make_secrets.py"
+    out = tmp_path / "secrets"
+    r = subprocess.run([sys.executable, str(script), "--out", str(out), "--customer-account", "0119:8C0FFEE01"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    users = json.loads((out / "users.json").read_text())
+    assert users["customer"] == {**users["customer"], "role": "customer", "account": "0119:8C0FFEE01"}
+    assert {u["role"] for u in users.values()} == {"analyst", "auditor", "customer"}
+    pw = dict(line.split(": ", 1) for line in (out / "demo_passwords.txt").read_text().splitlines())
+    assert verify_password(pw["customer"], users["customer"]["password_hash"])
+    assert stat.S_IMODE(os.stat(out / "demo_passwords.txt").st_mode) == 0o600
+    assert pw["customer"] not in r.stdout
+    again = subprocess.run([sys.executable, str(script), "--out", str(out), "--customer-account", "1:2"],
+                           capture_output=True, text=True)
+    assert again.returncode != 0 and "already has secrets" in again.stderr

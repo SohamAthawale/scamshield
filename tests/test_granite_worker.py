@@ -4,20 +4,16 @@ import types
 
 import pytest
 
-from claimsense import granite_worker
-from claimsense.explain import build_messages, rule_reasons
-from claimsense.granite_worker import RAW_ID, GraniteWriter, trim_to_sentence
+from scamshield.explain import build_messages, rule_reasons
+from scamshield.granite_worker import DISCLAIMER, RAW_ID, GraniteWriter, trim_to_sentence
 
-FACTS = {"rules": rule_reasons(["missing_attending"]), "claim": [], "provider": [], "amount": 120.0,
-         "provider_token": "PABCDEFGHIJKLMNOP", "provider_risk": 0.8}
+FACTS = {"rules": rule_reasons(["big_new_payee"]), "customer": [], "drivers": [], "amount_usd": 5000.0,
+         "payment_format": "Wire", "held": True, "risk": 0.93, "payment_token": "XABCDEFGHIJKLMNOP"}
 
 
 class FakeLlama:
     def __init__(self, reply="All good.", finish_reason="stop", **kwargs):
-        self.kwargs = kwargs
-        self.reply = reply
-        self.finish_reason = finish_reason
-        self.calls = []
+        self.kwargs, self.reply, self.finish_reason, self.calls = kwargs, reply, finish_reason, []
 
     def create_chat_completion(self, messages, temperature, max_tokens):
         self.calls.append({"messages": messages, "temperature": temperature, "max_tokens": max_tokens})
@@ -27,9 +23,7 @@ class FakeLlama:
 
 def writer(reply, finish_reason="stop", max_tokens=120) -> GraniteWriter:
     w = GraniteWriter.__new__(GraniteWriter)
-    w.llm = FakeLlama(reply, finish_reason)
-    w.model = "fake.gguf"
-    w.max_tokens = max_tokens
+    w.llm, w.model, w.max_tokens = FakeLlama(reply, finish_reason), "fake.gguf", max_tokens
     return w
 
 
@@ -43,47 +37,55 @@ def test_init_uses_llama_cpp(monkeypatch, tmp_path):
                             "verbose": False}
 
 
-def test_write_sends_pseudonymised_prompt():
-    w = writer("Please add the attending physician and resubmit.")
-    assert w.write("correction", FACTS) == "Please add the attending physician and resubmit."
+def test_write_sends_the_pseudonymised_prompt():
+    w = writer("Please check the payee's details before you send this.")
+    assert w.write("warning", FACTS) == "Please check the payee's details before you send this."
     call = w.llm.calls[0]
-    assert call["messages"] == build_messages("correction", FACTS)
+    assert call["messages"] == build_messages("warning", FACTS)
     assert call["temperature"] == 0.2 and call["max_tokens"] == 120
 
 
-def test_completion_is_stripped():
-    assert writer("  Check the date.  \n").write("correction", FACTS) == "Check the date."
-
-
-@pytest.mark.parametrize("raw", ["PRV51001", "BENE11001", "PHY390922", "CLM46614", "see PRV123."])
-def test_completion_with_raw_identifier_raises(raw):
+@pytest.mark.parametrize("raw", ["8000EBD30", "80BADBAD4", "8C0FFEE01", "NEW0000001", "paid 8ABCDEF12."])
+def test_completion_with_a_raw_account_number_raises(raw):
     with pytest.raises(ValueError, match="raw identifier"):
-        writer(f"The claim from {raw} looks odd.").write("correction", FACTS)
+        writer(f"The money went to {raw} today.").write("warning", FACTS)
 
 
-@pytest.mark.parametrize("ok", ["Provider PABCDEFGHIJKLMNOP is unusual.", "PRV12 is short", "XPRV51001",
-                                "PRV-51001", "CLAIMS 2009"])
-def test_tokens_and_lookalikes_are_allowed(ok):
+@pytest.mark.parametrize("ok", ["Payment XABCDEFGHIJKLMNOP looks risky.", "bank 0119 and 021174", "$8,000,000.",
+                                "800 dollars", "8000EBD3", "8000EBD301", "NEW123", "renewal 2022"])
+def test_tokens_bank_codes_and_lookalikes_are_allowed(ok):
     assert RAW_ID.search(ok) is None
-    writer(ok + " Done.").write("correction", FACTS)
+    writer(ok + " Done.").write("warning", FACTS)
 
 
-def test_brief_without_disclaimer_gets_it_appended():
-    out = writer("The provider bills many claims per patient.").write("brief", FACTS)
-    assert out.startswith("The provider bills many claims per patient.")
-    assert out.endswith("This is a model estimate, not a finding of fraud.")
+def test_any_nine_hex_account_shape_is_rejected():
+    # every 9-character hex string is account-shaped in this dataset, whatever its first character
+    assert RAW_ID.search("paid to 9000EBD30") is not None
 
 
-def test_brief_with_disclaimer_is_unchanged():
-    text = "Risk is elevated. The score is a model estimate and Not A Finding of fraud."
+def test_raw_id_guard_catches_accounts_starting_with_1():
+    with pytest.raises(ValueError, match="raw identifier"):
+        writer("The money went to 100428660 today.").write("warning", FACTS)
+
+
+@pytest.mark.parametrize("text", ["The score is a model estimate, not a finding of fraud.",
+                                  "This is NOT A FINDING of fraud.", "It is not a definitive finding.",
+                                  "This is not an official finding of wrongdoing."])
+def test_brief_with_a_disclaimer_is_unchanged(text):
+    assert DISCLAIMER.search(text)
     assert writer(text).write("brief", FACTS) == text
 
 
-def test_correction_never_gets_the_disclaimer():
-    assert "not a finding" not in writer("Fix the date.").write("correction", FACTS)
+def test_brief_without_disclaimer_gets_it_appended():
+    out = writer("The receiving account collects from many senders.").write("brief", FACTS)
+    assert out.endswith("\n\nThis is a model estimate, not a finding of fraud.")
 
 
-@pytest.mark.parametrize("reply", ["", "   ", "\n\n"])
+def test_warning_never_gets_the_disclaimer():
+    assert "finding" not in writer("Please call us first.").write("warning", FACTS)
+
+
+@pytest.mark.parametrize("reply", ["", "   ", "\n"])
 def test_empty_completion_raises(reply):
     with pytest.raises(ValueError, match="empty"):
         writer(reply).write("brief", FACTS)
@@ -91,48 +93,41 @@ def test_empty_completion_raises(reply):
 
 def test_unknown_kind_raises():
     with pytest.raises(ValueError):
-        writer("x.").write("poem", FACTS)
+        writer("x.").write("correction", FACTS)
 
 
-# ------------------------------------------------------------------------------ token limit
 @pytest.mark.parametrize("text,expected", [
-    ("One. Two. Thr", "One. Two."),
-    ("Is it? Yes! Then", "Is it? Yes!"),
-    ("Complete sentence.", "Complete sentence."),
-    ("Ends with a stop.  ", "Ends with a stop."),
-    ("No sentence end here", ""),
-    ("", ""),
-    ("Amount $1.5k is high. Then", "Amount $1.5k is high."),   # '.' inside a number is not a sentence end
-    ("Line one.\nLine two", "Line one."),
-    ("Wait... and", "Wait..."),
+    ("One. Two. Thr", "One. Two."), ("Is it? Yes! Then", "Is it? Yes!"), ("Done.", "Done."),
+    ("No end", ""), ("", ""), ("About $1.5k today. Then", "About $1.5k today."), ("Wait... and", "Wait..."),
 ])
 def test_trim_to_sentence(text, expected):
     assert trim_to_sentence(text) == expected
 
 
-def test_length_cut_completion_is_trimmed():
-    w = writer("Please check the service date. Then also verify the pat", finish_reason="length")
-    assert w.write("correction", FACTS) == "Please check the service date."
-
-
-def test_length_cut_brief_trimmed_then_disclaimer_added():
-    out = writer("Held because of a rule hit. The provider", finish_reason="length").write("brief", FACTS)
-    assert out == "Held because of a rule hit.\n\nThis is a model estimate, not a finding of fraud."
-
-
-def test_length_cut_without_any_full_sentence_raises():
+def test_length_cut_completion_is_trimmed_before_checks():
+    assert writer("Please check the payee. Then also the 8000EB", "length").write("warning", FACTS) == \
+        "Please check the payee."
+    out = writer("Held because of a rule. The receiv", "length").write("brief", FACTS)
+    assert out == "Held because of a rule.\n\nThis is a model estimate, not a finding of fraud."
     with pytest.raises(ValueError, match="empty"):
-        writer("Please check the", finish_reason="length").write("correction", FACTS)
+        writer("Please check the", "length").write("warning", FACTS)
+    assert writer("Ends without a stop", "stop").write("warning", FACTS) == "Ends without a stop"
 
 
-def test_no_trim_when_finished_normally():
-    assert writer("Ends without a stop", finish_reason="stop").write("correction", FACTS) == "Ends without a stop"
+def test_worker_prompt_from_a_stored_note_has_no_raw_ids(api_env):
+    """End to end: the facts the API queues for Granite never contain raw account numbers."""
+    from conftest import CUSTOMER_1, login, raw_account_numbers, service_headers
+    from scamshield.store import Store
 
-
-def test_raw_id_after_the_cut_is_dropped_not_rejected():
-    w = writer("Check the date. The claim CLM46614", finish_reason="length")
-    assert w.write("correction", FACTS) == "Check the date."
-
-
-def test_module_has_entrypoint():
-    assert callable(granite_worker.main)
+    with api_env.client() as c:
+        for p in api_env.stream():
+            assert c.post("/payments", json=p, headers=service_headers(api_env)).status_code == 200
+    st = Store(api_env.db, api_env.envelope())
+    jobs = st.claim_pending_notes(limit=1000)
+    assert {j["kind"] for j in jobs} == {"warning", "brief"}
+    raws = raw_account_numbers(api_env.aml) | {CUSTOMER_1[1]}
+    for j in jobs:
+        text = "\n".join(m["content"] for m in build_messages(j["kind"], j["facts"]))
+        assert not any(r in text for r in raws)
+        assert not RAW_ID.search(text)
+    st.conn.close()

@@ -1,0 +1,33 @@
+{
+ "sent": 30114,
+ "elapsed_s": 109.72,
+ "payments_per_sec": 274.5,
+ "outcomes": {
+  "ALLOW": 29613,
+  "WARN": 464,
+  "HOLD": 37
+ },
+ "client_latency_ms": {
+  "p50": 89.77,
+  "p99": 429.84
+ },
+ "server_latency_ms": {
+  "p50": 4.41,
+  "p99": 52.95
+ },
+ "avg_batch": 5.7,
+ "injected": {
+  "victim_to_mule": {
+   "injected": 57,
+   "warned": 37,
+   "held": 18,
+   "allowed": 2
+  },
+  "honest_new_payee": {
+   "injected": 57,
+   "warned": 40,
+   "held": 16,
+   "allowed": 1
+  }
+ }
+}

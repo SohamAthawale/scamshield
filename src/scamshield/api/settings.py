@@ -10,7 +10,8 @@ from pathlib import Path
 class Settings:
     models_dir: Path
     policy_file: Path
-    raw_dir: Path
+    history_file: Path
+    history_end: str
     db_path: Path
     checkpoint_path: Path
     secrets_dir: Path
@@ -23,17 +24,18 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         e = os.environ.get
-        data = Path(e("CLAIMSENSE_DATA_DIR", "/data"))
+        data = Path(e("SCAMSHIELD_DATA_DIR", "/data"))
         return cls(
-            models_dir=Path(e("CLAIMSENSE_MODELS", "/models")),
-            policy_file=Path(e("CLAIMSENSE_POLICY", "/app/config/policy.json")),
-            raw_dir=Path(e("CLAIMSENSE_RAW", "/raw")),
-            db_path=Path(e("CLAIMSENSE_DB", str(data / "claimsense.db"))),
-            checkpoint_path=Path(e("CLAIMSENSE_AUDIT_CHECKPOINTS", str(data / "audit_checkpoints.log"))),
-            secrets_dir=Path(e("CLAIMSENSE_SECRETS", "/run/secrets")),
+            models_dir=Path(e("SCAMSHIELD_MODELS", "/models")),
+            policy_file=Path(e("SCAMSHIELD_POLICY", "/app/config/policy.json")),
+            history_file=Path(e("SCAMSHIELD_HISTORY", "/data-in/history.csv")),
+            history_end=e("HISTORY_END", "2022-09-09"),
+            db_path=Path(e("SCAMSHIELD_DB", str(data / "scamshield.db"))),
+            checkpoint_path=Path(e("SCAMSHIELD_AUDIT_CHECKPOINTS", str(data / "audit_checkpoints.log"))),
+            secrets_dir=Path(e("SCAMSHIELD_SECRETS", "/run/secrets")),
             anomaly_backend=e("ANOMALY_BACKEND", "auto"),
-            nnpa_min_batch=int(e("NNPA_MIN_BATCH", "256")),
+            nnpa_min_batch=int(e("NNPA_MIN_BATCH", "1024")),
             batch_window_ms=float(e("BATCH_WINDOW_MS", "3")),
-            max_batch=int(e("MAX_BATCH", "512")),
+            max_batch=int(e("MAX_BATCH", "4096")),
             jwt_ttl_minutes=int(e("JWT_TTL_MINUTES", "480")),
         )

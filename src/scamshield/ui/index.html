@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ClaimSense</title>
+  <title>ScamShield</title>
   <link rel="stylesheet" href="styles.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="logo">◆</span> ClaimSense <span class="sub">real-time claim integrity on IBM LinuxONE</span></div>
+    <div class="brand"><span class="logo">◆</span> ScamShield <span class="sub">real-time scam and mule-account interception on IBM LinuxONE</span></div>
     <div class="who" id="who" hidden>
       <span class="badge" id="backend-badge" title="Inference backend in use">…</span>
       <span class="badge role" id="role-badge"></span>
@@ -18,10 +18,9 @@
   </header>
 
   <main>
-    <!-- login -->
     <section id="login-view" class="card login">
       <h1>Sign in</h1>
-      <p class="muted">Demo roles: <b>investigator</b>, <b>provider</b> (a billing office), <b>auditor</b>.</p>
+      <p class="muted">Demo roles: <b>analyst</b> (bank scam team), <b>customer</b> (a bank customer), <b>auditor</b>.</p>
       <form id="login-form">
         <label>Username <input name="username" autocomplete="username" required></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
@@ -30,47 +29,43 @@
       </form>
     </section>
 
-    <!-- shared KPIs (investigator + auditor) -->
     <section id="kpis" class="kpis" hidden>
-      <div class="kpi"><div class="label">Claims scored</div><div class="value" id="k-total">0</div><div class="hint">100% of claims, before payment</div></div>
-      <div class="kpi"><div class="label">Throughput</div><div class="value" id="k-rate">0</div><div class="hint">claims / second (10 s)</div></div>
+      <div class="kpi"><div class="label">Payments checked</div><div class="value" id="k-total">0</div><div class="hint">100% of payments, before money moves</div></div>
+      <div class="kpi"><div class="label">Throughput</div><div class="value" id="k-rate">0</div><div class="hint">payments / second (10 s)</div></div>
       <div class="kpi"><div class="label">Latency p50 / p99</div><div class="value" id="k-lat">–</div><div class="hint">ms, end to end in the API</div></div>
-      <div class="kpi"><div class="label">Decisions</div><div class="value small" id="k-mix">–</div><div class="hint">pay · return with fix · hold</div></div>
-      <div class="kpi"><div class="label">Held for review</div><div class="value" id="k-held">$0</div><div class="hint">payment paused, human decides</div></div>
+      <div class="kpi"><div class="label">Decisions</div><div class="value small" id="k-mix">–</div><div class="hint">allow · warn · hold</div></div>
+      <div class="kpi"><div class="label">Paused for call-back</div><div class="value" id="k-held">$0</div><div class="hint">money that hasn't left yet</div></div>
     </section>
 
-    <!-- investigator -->
-    <section id="investigator-view" hidden>
+    <section id="analyst-view" hidden>
       <div class="grid2">
         <div class="card">
-          <h2>Live claim stream</h2>
+          <h2>Live payment stream</h2>
           <div class="chartbox"><canvas id="rate-chart" aria-label="Throughput and latency over time"></canvas></div>
-          <table class="feed"><thead><tr><th>Claim</th><th>Provider</th><th class="num">Amount</th><th>Decision</th><th class="num">ms</th></tr></thead>
+          <table class="feed"><thead><tr><th>Payment</th><th>From → to</th><th class="num">USD</th><th>Format</th><th>Decision</th><th class="num">ms</th></tr></thead>
             <tbody id="feed"></tbody></table>
         </div>
         <div class="card">
-          <h2>Held cases <span class="count" id="case-count">0</span></h2>
-          <p class="muted">Claims held because an unusual claim came from a provider whose billing pattern scores as high risk. A model estimate, not a finding.</p>
+          <h2>Paused payments <span class="count" id="case-count">0</span></h2>
+          <p class="muted">Payments held because the risk model scores them as part of a scam or mule pattern. A model estimate, not a finding. Call the customer back before releasing.</p>
           <ul class="cases" id="cases"></ul>
         </div>
       </div>
       <div class="card">
-        <h2>Provider risk leaderboard</h2>
-        <p class="muted">Rolling provider patterns, updated with every claim. Drivers are the features that pushed the score up (SHAP), with the provider's percentile among peers.</p>
-        <table class="leader"><thead><tr><th>Provider</th><th class="num">Risk</th><th class="num">Claims</th><th>Top drivers</th></tr></thead><tbody id="leader"></tbody></table>
+        <h2>Mule-account watchlist</h2>
+        <p class="muted">Receiving accounts whose incoming payments score highest right now. Candidates to share with other banks (e.g. through AFCX) after review.</p>
+        <table class="leader"><thead><tr><th>Account</th><th class="num">Mean risk</th><th class="num">Max risk</th><th class="num">Payments in</th><th class="num">Warned / held</th></tr></thead><tbody id="watch"></tbody></table>
       </div>
     </section>
 
-    <!-- provider (billing office) -->
-    <section id="provider-view" hidden>
+    <section id="customer-view" hidden>
       <div class="card">
-        <h2>Claims that need your attention</h2>
-        <p class="muted">Most claims are paid straight away. These were returned with a suggested fix, or are being checked. Fixing and resubmitting is all that's needed.</p>
+        <h2>Payments we checked with you</h2>
+        <p class="muted">Almost every payment goes straight through. We pause or question a payment only when it looks like a scam pattern. You stay in control.</p>
         <ul class="returns" id="returns"></ul>
       </div>
     </section>
 
-    <!-- auditor -->
     <section id="auditor-view" hidden>
       <div class="grid2">
         <div class="card">
@@ -89,7 +84,6 @@
     </section>
   </main>
 
-  <!-- case drawer -->
   <aside id="drawer" class="drawer" hidden aria-label="Case details">
     <button class="ghost close" id="drawer-close" aria-label="Close">✕</button>
     <div id="drawer-body"></div>

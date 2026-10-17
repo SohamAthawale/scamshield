@@ -1,9 +1,9 @@
-"""Claim autoencoder scoring: torch on the Telum II NNPA, torch on CPU, or pure NumPy.
+"""Payment autoencoder scoring: torch on the Telum II NNPA, torch on CPU, or pure NumPy.
 
-Measured on z17 with the trained model and real claims (docs/evidence/bench/bench_autoencoder.csv): the
-NNPA is slower than the CPU up to ~64 claims per call (dispatch overhead), even at 256, 1.4x faster at
-1024 and 1.6x at 4096, and slower again for one huge call of 16384. So batches of at least
-`nnpa_min_batch` rows go to the NNPA in chunks of at most `nnpa_chunk` rows; smaller ones stay on the CPU.
+Measured on z17 with the trained payment model and real held-out payments
+(docs/evidence/bench/bench_autoencoder.csv): the NNPA is slower than the CPU up to ~256 payments per call
+(dispatch overhead), 1.2x faster at 1,024 and 1.4x at 4,096. So batches of at least `nnpa_min_batch`
+rows go to the NNPA in chunks of at most `nnpa_chunk` rows; smaller ones stay on the CPU.
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class NumpyAnomalyScorer(_Base):
 
 
 class TorchAnomalyScorer(_Base):
-    def __init__(self, art: Artifacts, use_nnpa: bool, nnpa_min_batch: int = 256, nnpa_chunk: int = 4096):
+    def __init__(self, art: Artifacts, use_nnpa: bool, nnpa_min_batch: int = 1024, nnpa_chunk: int = 4096):
         import torch
 
         self.torch = torch
@@ -91,7 +91,7 @@ class TorchAnomalyScorer(_Base):
             return self.cpu_model(x).numpy()
 
 
-def load_anomaly_scorer(models_dir: str | Path, backend: str = "auto", nnpa_min_batch: int = 256) -> AnomalyScorer:
+def load_anomaly_scorer(models_dir: str | Path, backend: str = "auto", nnpa_min_batch: int = 1024) -> AnomalyScorer:
     """backend: auto | nnpa | cpu | numpy. auto = nnpa if available, then cpu torch, then numpy."""
     art = Artifacts(Path(models_dir))
     chains = {"auto": ["nnpa", "cpu", "numpy"], "nnpa": ["nnpa", "cpu", "numpy"],

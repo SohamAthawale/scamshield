@@ -1,0 +1,6 @@
+model,device,batch,iterations,p50_us,p99_us,payments_per_sec
+risk_xgboost,cpu,1,5000,85.6,201.1,11685.0
+risk_xgboost,cpu,32,3000,354.7,484.9,90205.0
+risk_xgboost,cpu,512,500,2063.6,2301.9,248109.0
+risk_xgboost,cpu,4096,100,14951.4,15286.8,273955.0
+risk_xgboost_shap,cpu,1,500,2376.4,2703.2,

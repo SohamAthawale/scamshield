@@ -1,11 +1,12 @@
-# ClaimSense on IBM LinuxONE.
-#   docker compose up -d --build                 api + Granite worker
-#   docker compose --profile demo up simulator   replay held-out claims (with injected billing errors)
-#   docker compose --profile dev up -d jupyter   notebooks (training, charts)
+# ScamShield on IBM LinuxONE.
+#   docker compose up -d --build                       api + Granite worker
+#   docker compose --profile demo run --rm simulator   replay the held-out days (with injected scam payments)
+#   docker compose --profile dev up -d jupyter         notebooks (training, charts)
 # Only the api is published, and only on 127.0.0.1. Reach it through scripts/tunnel.sh.
+name: scamshield
 
 x-app: &app
-  image: claimsense-app:latest
+  image: scamshield-app:latest
   build:
     context: .
     dockerfile: deploy/app.Dockerfile
@@ -16,11 +17,12 @@ x-app: &app
   cap_drop: [ALL]
   restart: unless-stopped
   environment: &env
-    CLAIMSENSE_SECRETS: /run/secrets
-    CLAIMSENSE_DATA_DIR: /data
-    CLAIMSENSE_MODELS: /models
-    CLAIMSENSE_RAW: /raw
-    CLAIMSENSE_POLICY: /app/config/policy.json
+    SCAMSHIELD_SECRETS: /run/secrets
+    SCAMSHIELD_DATA_DIR: /data
+    SCAMSHIELD_MODELS: /models
+    SCAMSHIELD_RAW: /raw
+    SCAMSHIELD_HISTORY: /data-in/history.csv
+    SCAMSHIELD_POLICY: /app/config/policy.json
 
 services:
   api:
@@ -28,38 +30,39 @@ services:
     environment:
       <<: *env
       ANOMALY_BACKEND: ${ACCEL_MODE:-auto}
-      NNPA_MIN_BATCH: ${NNPA_MIN_BATCH:-256}
+      NNPA_MIN_BATCH: ${NNPA_MIN_BATCH:-1024}
       BATCH_WINDOW_MS: ${BATCH_WINDOW_MS:-3}
-      MAX_BATCH: ${MAX_BATCH:-512}
+      MAX_BATCH: ${MAX_BATCH:-4096}
+      HISTORY_END: ${HISTORY_END:-2022-09-09}
     volumes:
-      - ${SHARED:-/home/linux1/shared}/models:/models:ro
-      - ${SHARED:-/home/linux1/shared}/data/raw:/raw:ro
+      - ${SHARED:-/home/linux1/shared/scamshield}/models:/models:ro
+      - ${SHARED:-/home/linux1/shared/scamshield}/data:/data-in:ro
       - ./secrets:/run/secrets:ro
       - appdata:/data
     ports:
       - "127.0.0.1:8000:8000"
-    mem_limit: 2g
+    mem_limit: 3g
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 30s
+      start_period: 180s   # builds rolling state from ~4.2M historical payments at start-up
 
   granite:
     <<: *app
-    command: ["python", "-m", "claimsense.granite_worker"]
+    command: ["python", "-m", "scamshield.granite_worker"]
     environment:
       <<: *env
       GRANITE_MODEL: /llm/${GRANITE_FILE:-granite-3.3-2b-instruct-be.Q8_0.gguf}
       GRANITE_THREADS: ${GRANITE_THREADS:-3}
       GRANITE_MAX_TOKENS: ${GRANITE_MAX_TOKENS:-120}
     volumes:
-      - ${SHARED:-/home/linux1/shared}/models/llm:/llm:ro
+      - ${LLM_DIR:-/home/linux1/shared/models/llm}:/llm:ro
       - ./secrets:/run/secrets:ro
       - appdata:/data
     mem_limit: 3g
-    # Granite is off the hot path: it may use idle CPU, but yields to claim scoring under contention
+    # Granite is off the hot path: it may use idle CPU, but yields to payment scoring under contention
     cpu_shares: 128
     depends_on:
       api:
@@ -69,18 +72,18 @@ services:
     <<: *app
     profiles: [demo]
     restart: "no"
-    command: ["python", "-m", "claimsense.simulator", "--url", "http://api:8000", "--limit", "${SIM_LIMIT:-5000}",
+    command: ["python", "-m", "scamshield.simulator", "--url", "http://api:8000", "--limit", "${SIM_LIMIT:-5000}",
               "--rate", "${SIM_RATE:-100}", "--inject", "${SIM_INJECT:-0.01}", "--concurrency", "${SIM_CONCURRENCY:-64}"]
     environment:
       <<: *env
       STREAM_FILE: /data-in/stream_test.csv
       SIM_OUT: /sim
     volumes:
-      - ${SHARED:-/home/linux1/shared}/data:/data-in:ro
-      - ${SHARED:-/home/linux1/shared}/data/raw:/raw:ro
-      - ${SHARED:-/home/linux1/shared}/sim:/sim
+      - ${SHARED:-/home/linux1/shared/scamshield}/data:/data-in:ro
+      - ${SHARED:-/home/linux1/shared/scamshield}/aml:/raw:ro
+      - ${SHARED:-/home/linux1/shared/scamshield}/sim:/sim
       - ./secrets/service_token:/run/secrets/service_token:ro
-    mem_limit: 512m
+    mem_limit: 768m
     depends_on:
       api:
         condition: service_healthy
@@ -91,13 +94,13 @@ services:
     command: ["jupyter", "lab", "--ServerApp.ip=0.0.0.0", "--ServerApp.port=38888",
               "--ServerApp.token=${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}", "--ServerApp.allow_origin=http://localhost:38888"]
     environment:
-      PYTHONPATH: /home/ibm-user/claimsense/src
+      PYTHONPATH: /home/ibm-user/scamshield/src
     volumes:
-      - ${SHARED:-/home/linux1/shared}:/home/ibm-user/shared
-      - ./:/home/ibm-user/claimsense
+      - ${SHARED:-/home/linux1/shared/scamshield}:/home/ibm-user/shared
+      - ./:/home/ibm-user/scamshield
     ports:
       - "127.0.0.1:38888:38888"
-    mem_limit: 3g
+    mem_limit: 4g
 
 volumes:
   appdata:

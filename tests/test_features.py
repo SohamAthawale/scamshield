@@ -1,532 +1,331 @@
-"""features.py: streaming (one claim) and batch (DataFrame) implementations must agree."""
-import datetime as dt
+"""features.py: one streaming engine for training and serving. Parity, causality, semantics, context, rules."""
 import math
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from claimsense.data import CHRONIC_COLS, DIAG_COLS, PROC_COLS
-from claimsense.features import (
-    CLAIM_FEATURES, FEATURE_LABELS, HARD_RULES, MAX_CLAIM_DAYS, PROVIDER_FEATURES, PROVIDER_LABELS,
-    DuplicateIndex, FeatureContext, ProviderState, _code, _date, _present, claim_features,
-    claim_features_batch, duplicate_key, hard_errors, hard_errors_batch, provider_features_batch,
-    provider_features_prefixes,
+from scamshield.data import FORMATS
+from scamshield.features import (
+    ANOMALY_FEATURES, FEATURE_LABELS, FEATURES, IDLE_CAP_H, INTRINSIC, RECEIVER, RULES, SENDER, TAU_MIN,
+    FeatureContext, FeatureEngine, rule_hits,
 )
 
-from conftest import assert_close, attending_key, bene_fields, make_claims
-
-RULES_NO_DUP = ["after_death", "end_before_start", "discharge_before_admission", "missing_attending", "no_coverage"]
-
-
-def stream_features(df, ctx):
-    return pd.DataFrame([claim_features(r, bene_fields(r), ctx) for r in df.to_dict("records")],
-                        index=df.index)[CLAIM_FEATURES]
+CTX = FeatureContext(usd_per_unit={"US Dollar": 1.0, "Euro": 1.1, "Yen": 0.0075})
+CURRENCIES = list(CTX.usd_per_unit)
 
 
-def api_style(claim: dict) -> dict:
-    """What a JSON API would hand the streaming path: ISO date strings, None or 'NA' for missing."""
-    out = {}
-    for k, v in claim.items():
-        if isinstance(v, pd.Timestamp):
-            out[k] = v.date().isoformat()
-        elif v is pd.NaT:
-            out[k] = "NA"
-        elif isinstance(v, float) and math.isnan(v):
-            out[k] = None
-        else:
-            out[k] = v
-    return out
-
-
-def base_claim(**over) -> dict:
-    c = {
-        "ClaimID": "CLM1", "BeneID": "BENE1", "Provider": "PRV1",
-        "ClaimStartDt": "2009-04-12", "ClaimEndDt": "2009-04-18",
-        "AdmissionDt": "2009-04-12", "DischargeDt": "2009-04-18",
-        "InscClaimAmtReimbursed": 26000.0, "DeductibleAmtPaid": 1068.0,
-        "AttendingPhysician": "PHY1", "OperatingPhysician": None, "OtherPhysician": None,
-        "ClmAdmitDiagnosisCode": "4019", "DiagnosisGroupCode": "201",
-        **{c: None for c in DIAG_COLS}, **{c: None for c in PROC_COLS},
-        "is_inpatient": 1,
-    }
-    c["ClmDiagnosisCode_1"] = "4019"
-    c.update(over)
-    return c
-
-
-def base_bene(**over) -> dict:
-    b = {"DOB": "1943-01-01", "DOD": None, "RenalDiseaseIndicator": 0,
-         "NoOfMonths_PartACov": 12, "NoOfMonths_PartBCov": 12, **{c: 0 for c in CHRONIC_COLS}}
-    b.update(over)
-    return b
-
-
-def as_frame(claim: dict, bene: dict) -> pd.DataFrame:
-    df = pd.DataFrame([{**claim, **bene}])
-    for c in ["ClaimStartDt", "ClaimEndDt", "AdmissionDt", "DischargeDt", "DOB", "DOD"]:
-        df[c] = pd.to_datetime(df[c].replace({"NA": None}))
+def random_payments(seed: int, n: int = 300, n_accounts: int = 12) -> pd.DataFrame:
+    """Hypothesis-style random stream: few accounts (so histories interact), same-minute bursts, self-transfers,
+    all formats, all currencies, zero amounts, cross-bank and same-bank payments."""
+    rng = np.random.default_rng(seed)
+    banks = ["010", "001", "0119"]
+    accts = [(str(rng.choice(banks)), f"8{i:08X}") for i in range(n_accounts)]
+    t = pd.Timestamp("2022-09-01") + pd.to_timedelta(np.sort(rng.integers(0, 3 * 24 * 60, n)), unit="m")
+    rows = []
+    for i in range(n):
+        s = accts[int(rng.integers(n_accounts))]
+        r = s if rng.random() < 0.05 else accts[int(rng.integers(n_accounts))]
+        cp = str(rng.choice(CURRENCIES))
+        cr = cp if rng.random() < 0.8 else str(rng.choice(CURRENCIES))
+        amt = 0.0 if rng.random() < 0.03 else float(np.round(np.exp(rng.uniform(-2, 12)), 2))
+        rows.append({"ts": t[i], "from_bank": s[0], "from_acct": s[1], "to_bank": r[0], "to_acct": r[1],
+                     "amount_received": amt, "currency_received": cr, "amount_paid": amt, "currency_paid": cp,
+                     "payment_format": str(rng.choice(FORMATS)), "label": int(rng.random() < 0.1)})
+    df = pd.DataFrame(rows)
+    df["sender"] = df["from_bank"] + ":" + df["from_acct"]
+    df["receiver"] = df["to_bank"] + ":" + df["to_acct"]
     return df
 
 
-# ------------------------------------------------------------------------------ helpers
-@pytest.mark.parametrize("v,expected", [
-    (None, None), (float("nan"), None), (pd.NaT, None), ("", None), ("NA", None), ("nan", None),
-    ("NaT", None), ("None", None), ("2009-04-12", dt.date(2009, 4, 12)),
-    ("2009-04-12 00:00:00", dt.date(2009, 4, 12)), (pd.Timestamp("2009-04-12"), dt.date(2009, 4, 12)),
-    (dt.datetime(2009, 4, 12, 13, 5), dt.date(2009, 4, 12)), (dt.date(2009, 4, 12), dt.date(2009, 4, 12)),
-])
-def test_date_parsing(v, expected):
-    assert _date(v) == expected
+def observe_rows(df: pd.DataFrame, ctx: FeatureContext = CTX) -> np.ndarray:
+    fe = FeatureEngine(ctx)
+    return np.array([fe.observe_txn(r) for r in df.to_dict("records")], dtype=np.float32)
 
 
-@pytest.mark.parametrize("v,expected", [
-    (7092.0, "7092"), ("7092", "7092"), ("7092.0", "7092"), (np.float64(7092.0), "7092"), (7092, "7092"),
-    ("V5866", "V5866"), ("E8889", "E8889"), (" 4019 ", "4019"), ("0389", "0389"),
-    (None, "NA"), (float("nan"), "NA"), ("NA", "NA"), ("", "NA"), ("nan", "NA"),
-])
-def test_code_normalisation(v, expected):
-    assert _code(v) == expected
+def explicit_rows(df: pd.DataFrame, ctx: FeatureContext = CTX) -> np.ndarray:
+    fe = FeatureEngine(ctx)
+    out = []
+    for r in df.to_dict("records"):
+        ts = pd.Timestamp(r["ts"])
+        out.append(fe.observe(ts.value / 6e10, r["sender"], r["receiver"], ctx.to_usd(r["amount_paid"], r["currency_paid"]),
+                              r["payment_format"], r["from_bank"] != r["to_bank"],
+                              r["currency_paid"] != r["currency_received"], ts.hour))
+    return np.array(out, dtype=np.float32)
 
 
-@pytest.mark.parametrize("v,expected", [
-    (None, False), (float("nan"), False), (np.float32("nan"), False), ("", False), ("  ", False),
-    ("NA", False), ("na", False), ("NaN", False), ("None", False), ("PHY1", True), (0, True), (0.0, True),
-])
-def test_present(v, expected):
-    assert _present(v) is expected
+# ------------------------------------------------------------------------------ feature lists
+def test_feature_lists():
+    assert FEATURES == INTRINSIC + SENDER + RECEIVER
+    assert ANOMALY_FEATURES == INTRINSIC + SENDER          # the customer model never sees receiver signals
+    assert not set(ANOMALY_FEATURES) & set(RECEIVER)
+    assert len(set(FEATURES)) == len(FEATURES)
+    assert set(FEATURE_LABELS) == set(FEATURES)
+    assert [f for f in FEATURES if f.startswith("fmt_")] == [f"fmt_{x.replace(' ', '')}" for x in FORMATS]
 
 
-def test_labels_cover_every_feature():
-    assert set(FEATURE_LABELS) == set(CLAIM_FEATURES)
-    assert set(PROVIDER_LABELS) == set(PROVIDER_FEATURES)
-    assert len(set(CLAIM_FEATURES)) == len(CLAIM_FEATURES)
+# ------------------------------------------------------------------------------ parity
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_run_equals_observe_row_by_row_random(seed):
+    df = random_payments(seed)
+    X = FeatureEngine(CTX).run(df)
+    assert X.shape == (len(df), len(FEATURES)) and X.dtype == np.float32
+    np.testing.assert_array_equal(X, observe_rows(df))
+    np.testing.assert_array_equal(X, explicit_rows(df))
+    assert np.isfinite(X).all()
+
+
+def test_run_equals_observe_on_synthetic_aml(aml):
+    np.testing.assert_array_equal(aml.X, observe_rows(aml.tx, aml.ctx))
+
+
+def test_observe_txn_accepts_iso_strings(aml):
+    fe1, fe2 = FeatureEngine(aml.ctx), FeatureEngine(aml.ctx)
+    for r in aml.tx.head(80).to_dict("records"):
+        a = fe1.observe_txn(r)
+        b = fe2.observe_txn({**r, "ts": r["ts"].strftime("%Y-%m-%dT%H:%M:%S")})
+        assert a == b
+
+
+def test_observe_returns_python_floats_in_feature_order():
+    f = FeatureEngine(CTX).observe(0.0, "A", "B", 100.0, "ACH", True, False, 13)
+    assert len(f) == len(FEATURES) and all(isinstance(v, float) for v in f)
+
+
+# ------------------------------------------------------------------------------ causality
+@pytest.mark.parametrize("k", [1, 50, 151, 299])
+def test_features_never_depend_on_later_payments(k):
+    df = random_payments(7)
+    full = FeatureEngine(CTX).run(df)
+    np.testing.assert_array_equal(FeatureEngine(CTX).run(df.iloc[:k]), full[:k])
+    # change everything about the future: earlier features must not move
+    fut = df.copy()
+    fut.loc[k:, "amount_paid"] *= 1000
+    fut.loc[k:, "payment_format"] = "Bitcoin"
+    fut.loc[k:, "receiver"] = fut.loc[k:, "sender"]
+    np.testing.assert_array_equal(FeatureEngine(CTX).run(fut)[:k], full[:k])
+
+
+def test_features_never_depend_on_labels(aml):
+    flipped = aml.tx.assign(label=1 - aml.tx["label"])
+    np.testing.assert_array_equal(FeatureEngine(aml.ctx).run(flipped), aml.X)
+    np.testing.assert_array_equal(FeatureEngine(aml.ctx).run(aml.tx.drop(columns=["label"])), aml.X)
+
+
+def test_payment_does_not_see_itself():
+    """A payment's own amount/receiver are never part of its 'history' features."""
+    fe = FeatureEngine(CTX)
+    f = dict(zip(FEATURES, fe.observe(0.0, "A", "B", 1e6, "Wire", True, False, 0)))
+    assert f["s_log_n_out"] == 0 and f["r_log_n_in"] == 0 and f["s_amount_vs_usual"] == 0
+    assert f["s_is_new"] == 1 and f["r_is_new"] == 1 and f["r_log_senders"] == 0
+
+
+def test_appending_future_rows_to_aml_keeps_earlier_features(aml):
+    extra = aml.tx.tail(20).copy()
+    extra["ts"] = extra["ts"] + pd.Timedelta(days=1)
+    longer = pd.concat([aml.tx, extra], ignore_index=True)
+    np.testing.assert_array_equal(FeatureEngine(aml.ctx).run(longer)[: len(aml.tx)], aml.X)
+
+
+# ------------------------------------------------------------------------------ semantics
+def feats(fe, t, s, r, usd, fmt="ACH", cross=True, mism=False, hour=12):
+    return dict(zip(FEATURES, fe.observe(t, s, r, usd, fmt, cross, mism, hour)))
+
+
+def test_first_payment_of_new_accounts():
+    f = feats(FeatureEngine(CTX), 0.0, "A", "B", 100.0, "Wire", True, True, 6)
+    assert f["log_usd"] == pytest.approx(math.log1p(100))
+    assert f["fmt_Wire"] == 1 and sum(f[k] for k in FEATURES if k.startswith("fmt_")) == 1
+    assert f["cross_bank"] == 1 and f["currency_mismatch"] == 1 and f["self_transfer"] == 0
+    assert f["hour_sin"] == pytest.approx(1.0) and f["hour_cos"] == pytest.approx(0.0, abs=1e-12)
+    assert f["s_new_payee"] == 1 and f["s_is_new"] == 1 and f["r_is_new"] == 1
+    assert f["s_log_idle_h"] == pytest.approx(math.log1p(IDLE_CAP_H))
+    assert f["r_log_idle_h"] == pytest.approx(math.log1p(IDLE_CAP_H))
+    assert f["s_recent_out"] == 0 and f["r_recent_in"] == 0 and f["r_fan_in"] == 0
+
+
+def test_repeat_payment_and_usual_amount():
+    fe = FeatureEngine(CTX)
+    feats(fe, 0.0, "A", "B", 100.0)
+    f = feats(fe, 60.0, "A", "B", 1000.0)
+    assert f["s_new_payee"] == 0 and f["s_is_new"] == 0
+    assert f["s_log_n_out"] == pytest.approx(math.log1p(1)) and f["s_log_payees"] == pytest.approx(math.log1p(1))
+    assert f["s_amount_vs_usual"] == pytest.approx(math.log1p(1000) - math.log1p(100))
+    assert f["s_log_idle_h"] == pytest.approx(math.log1p(1.0))
+    assert f["s_recent_out"] == pytest.approx(math.exp(-60 / TAU_MIN))
+    assert f["r_log_n_in"] == pytest.approx(math.log1p(1)) and f["r_log_senders"] == pytest.approx(math.log1p(1))
+    assert f["r_fan_in"] == 1.0 and f["r_share_ach_in"] == 1.0
+    assert f["r_recent_in"] == pytest.approx(math.exp(-60 / TAU_MIN))
+
+
+def test_usual_is_mean_of_log_amounts():
+    fe = FeatureEngine(CTX)
+    for i, a in enumerate([10.0, 100.0, 1000.0]):
+        feats(fe, float(i), "A", f"P{i}", a)
+    f = feats(fe, 10.0, "A", "P9", 50.0)
+    usual = np.mean([math.log1p(10), math.log1p(100), math.log1p(1000)])
+    assert f["s_amount_vs_usual"] == pytest.approx(math.log1p(50) - usual)
+    assert f["s_log_payees"] == pytest.approx(math.log1p(3))
+
+
+def test_receiver_fan_in_and_pass_through():
+    fe = FeatureEngine(CTX)
+    feats(fe, 0.0, "S1", "M", 100.0, "ACH")
+    feats(fe, 1.0, "S2", "M", 100.0, "Wire")
+    feats(fe, 2.0, "S1", "M", 100.0, "ACH")
+    f = feats(fe, 3.0, "S3", "M", 100.0)
+    assert f["r_log_n_in"] == pytest.approx(math.log1p(3)) and f["r_log_senders"] == pytest.approx(math.log1p(2))
+    assert f["r_fan_in"] == pytest.approx(2 / 3) and f["r_share_ach_in"] == pytest.approx(2 / 3)
+    out = feats(fe, 4.0, "M", "X", 380.0)                      # the mule sends on what it collected
+    assert out["s_log_n_in"] == pytest.approx(math.log1p(4))
+    assert out["s_pass_through"] == pytest.approx(math.log1p(0) - math.log1p(400))
+    nxt = feats(fe, 5.0, "M", "Y", 10.0)
+    assert nxt["s_pass_through"] == pytest.approx(math.log1p(380) - math.log1p(400))
+    assert feats(fe, 6.0, "Z", "M", 1.0)["r_pass_through"] == pytest.approx(math.log1p(390) - math.log1p(400))
+
+
+def test_self_transfer_and_idle_cap():
+    fe = FeatureEngine(CTX)
+    assert feats(fe, 0.0, "A", "A", 5.0, "Reinvestment", False)["self_transfer"] == 1
+    f = feats(fe, 60.0 * 24 * 365, "A", "B", 5.0)              # a year later: capped at 30 days
+    assert f["s_log_idle_h"] == pytest.approx(math.log1p(IDLE_CAP_H))
+    assert f["s_recent_out"] == pytest.approx(0.0, abs=1e-30)
+
+
+def test_decayed_counter_accumulates():
+    fe = FeatureEngine(CTX)
+    for t in (0.0, 0.0, 0.0):
+        feats(fe, t, "A", "B", 1.0)
+    f = feats(fe, TAU_MIN, "A", "B", 1.0)
+    assert f["s_recent_out"] == pytest.approx(3 * math.exp(-1))
+
+
+def test_unknown_format_and_negative_amount():
+    f = feats(FeatureEngine(CTX), 0.0, "A", "B", -50.0, "Telepathy")
+    assert all(f[k] == 0 for k in FEATURES if k.startswith("fmt_"))
+    assert f["log_usd"] == 0.0
+
+
+@pytest.mark.parametrize("hour", [0, 6, 12, 18, 23])
+def test_hour_encoding_is_on_the_unit_circle(hour):
+    f = feats(FeatureEngine(CTX), 0.0, "A", "B", 1.0, hour=hour)
+    assert f["hour_sin"] ** 2 + f["hour_cos"] ** 2 == pytest.approx(1.0)
+    assert f["hour_sin"] == pytest.approx(math.sin(2 * math.pi * hour / 24))
+
+
+def test_run_uses_bank_columns_for_cross_bank_and_converts_currency():
+    df = random_payments(5, n=40)
+    X = FeatureEngine(CTX).run(df)
+    i = FEATURES.index("cross_bank")
+    np.testing.assert_array_equal(X[:, i], (df["from_bank"] != df["to_bank"]).astype(np.float32))
+    usd = df["amount_paid"] * df["currency_paid"].map(CTX.usd_per_unit)
+    np.testing.assert_allclose(X[:, FEATURES.index("log_usd")], np.log1p(usd), rtol=1e-6)
 
 
 # ------------------------------------------------------------------------------ FeatureContext
-def test_context_fit_counts(train_claims, ctx):
-    assert ctx.pair_total == len(train_claims) == ctx.dx_total
-    assert sum(ctx.pair_counts.values()) == ctx.pair_total
-    assert sum(ctx.dx_counts.values()) == ctx.dx_total
-    assert set(ctx.global_amount_median) == {"0", "1"}
-    assert all("|" in k for k in ctx.pair_counts)
+def test_context_fit_walks_the_conversion_graph(aml):
+    rates = aml.ctx.usd_per_unit
+    assert rates["US Dollar"] == 1.0
+    assert rates["Euro"] == pytest.approx(1.1, rel=0.01)
+    assert rates["Yen"] == pytest.approx(0.0075, rel=0.02)      # only Yen<->Euro conversions exist
 
 
-def test_context_fit_min_count_for_median():
-    df = make_claims(seed=3, n=200, messy=False)
-    ctx = FeatureContext.fit(df, min_count_for_median=10_000)
-    assert ctx.dx_amount_median == {}
-    assert ctx.min_count_for_median == 10_000
-    ctx5 = FeatureContext.fit(df, min_count_for_median=5)
-    key = df["is_inpatient"].astype(str) + "|" + df["ClmDiagnosisCode_1"].map(_code)
-    counts = key.value_counts()
-    assert set(ctx5.dx_amount_median) == set(counts[counts >= 5].index)
-    k = next(iter(ctx5.dx_amount_median))
-    sub = df[key == k]["InscClaimAmtReimbursed"].clip(lower=0)
-    assert ctx5.dx_amount_median[k] == pytest.approx(float(np.median(np.log1p(sub))))
+def conv_df(rows):
+    return pd.DataFrame(rows, columns=["currency_paid", "currency_received", "amount_paid", "amount_received"])
 
 
-def test_context_rare_pair_threshold_is_95th_percentile(train_claims, ctx):
-    pair = train_claims["ClmDiagnosisCode_1"].map(_code) + "|" + train_claims["ClmProcedureCode_1"].map(_code)
-    rar = [ctx.pair_rarity(*p.split("|")) for p in pair]
-    assert ctx.rare_pair_threshold == pytest.approx(float(np.quantile(rar, 0.95)))
+def test_context_fit_uses_median_and_both_directions():
+    df = conv_df([("Euro", "US Dollar", 100, 110), ("Euro", "US Dollar", 100, 120), ("Euro", "US Dollar", 100, 100),
+                  ("US Dollar", "Pound", 100, 80), ("US Dollar", "US Dollar", 5, 5)])
+    ctx = FeatureContext.fit(df)
+    assert ctx.usd_per_unit["Euro"] == pytest.approx(1.1)
+    assert ctx.usd_per_unit["Pound"] == pytest.approx(1 / 0.8)  # 1 USD = 0.8 Pound
+    assert ctx.to_usd(10, "Pound") == pytest.approx(12.5)
 
 
-def test_context_json_round_trip(ctx, live_claims):
-    back = FeatureContext.from_json(ctx.to_json())
-    assert back == ctx
-    assert_close(claim_features_batch(live_claims, back), claim_features_batch(live_claims, ctx), atol=0, rtol=0)
+def test_context_fit_ignores_zero_amount_conversions():
+    df = conv_df([("Euro", "US Dollar", 0, 110), ("Euro", "US Dollar", 100, 0), ("Euro", "US Dollar", 100, 110)])
+    assert FeatureContext.fit(df).usd_per_unit["Euro"] == pytest.approx(1.1)
 
 
-def test_context_lookups(ctx):
-    assert ctx.dx_rarity("never-seen") == pytest.approx(math.log1p(ctx.dx_total))
-    assert ctx.pair_rarity("never", "seen") == pytest.approx(math.log1p(ctx.pair_total))
-    common = max(ctx.dx_counts, key=ctx.dx_counts.get)
-    assert 0 <= ctx.dx_rarity(common) < ctx.dx_rarity("never-seen")
-    assert ctx.typical_log_amount(1, "never-seen") == ctx.global_amount_median["1"]
-    assert ctx.typical_log_amount(0, "never-seen") == ctx.global_amount_median["0"]
-    k = next(iter(ctx.dx_amount_median))
-    inp, dx = k.split("|")
-    assert ctx.typical_log_amount(int(inp), dx) == ctx.dx_amount_median[k]
-    assert FeatureContext().typical_log_amount(1, "x") == 0.0
+def test_context_fit_raises_without_a_path_to_usd():
+    df = conv_df([("Yen", "Rupee", 100, 60), ("US Dollar", "US Dollar", 1, 1)])
+    with pytest.raises(ValueError, match="no conversion path"):
+        FeatureContext.fit(df)
 
 
-# ------------------------------------------------------------------------------ claim feature parity
-@pytest.mark.parametrize("seed", [11, 12, 13])
-def test_claim_features_stream_equals_batch_random(seed, ctx):
-    df = make_claims(seed=seed, n=250, unseen_share=0.15)
-    batch = claim_features_batch(df, ctx)
-    assert list(batch.columns) == CLAIM_FEATURES
-    assert_close(stream_features(df, ctx), batch)
+def test_context_to_usd_and_json_round_trip(aml):
+    assert aml.ctx.to_usd(10, "US Dollar") == 10.0
+    assert aml.ctx.to_usd(10, "Unknown Coin") == 10.0           # unknown currency treated as USD (see report)
+    back = FeatureContext.from_json(aml.ctx.to_json())
+    assert back == aml.ctx and back.rule_big_new_payee_ratio == 10.0
+    np.testing.assert_array_equal(FeatureEngine(back).run(aml.tx), aml.X)
 
 
-def test_claim_features_api_style_dicts_equal_batch(live_claims, ctx):
-    """ISO strings / 'NA' / None (what JSON gives the API) must give the same features as Timestamps."""
-    batch = claim_features_batch(live_claims, ctx)
-    for i, r in enumerate(live_claims.to_dict("records")):
-        c = api_style(r)
-        f = claim_features(c, c, ctx)
-        assert_close([f[k] for k in CLAIM_FEATURES], batch.iloc[i].to_numpy())
-
-
-def test_claim_features_batch_accepts_pandas_str_dtype(live_claims, ctx):
-    """pandas 3 default string dtype (missing = NaN) must give the same features as object columns."""
-    s = live_claims.copy()
-    for c in ["ClaimID", "BeneID", "Provider", "AttendingPhysician", "OperatingPhysician", "OtherPhysician",
-              "ClmAdmitDiagnosisCode", *DIAG_COLS, *PROC_COLS]:
-        s[c] = s[c].astype("str")
-    assert_close(claim_features_batch(s, ctx), claim_features_batch(live_claims, ctx))
-    assert_close(stream_features(s, ctx), claim_features_batch(live_claims, ctx))
-
-
-def test_claim_features_batch_preserves_index(live_claims, ctx):
-    df = live_claims.iloc[::-1].copy()
-    df.index = [f"r{i}" for i in range(len(df))]
-    out = claim_features_batch(df, ctx)
-    assert list(out.index) == list(df.index)
-    assert_close(out, stream_features(df, ctx))
-
-
-def test_claim_features_keys_and_types(ctx):
-    f = claim_features(base_claim(), base_bene(), ctx)
-    assert list(f) == CLAIM_FEATURES
-    assert all(isinstance(v, float) for v in f.values())
-
-
-def test_claim_features_known_values(ctx):
-    claim = base_claim(OperatingPhysician="PHY1", OtherPhysician="PHY9", ClmDiagnosisCode_2="25000",
-                       ClmProcedureCode_1=7092.0)
-    bene = base_bene(RenalDiseaseIndicator=1, ChronicCond_Cancer=1, ChronicCond_stroke=1, NoOfMonths_PartBCov=6)
-    f = claim_features(claim, bene, ctx)
-    assert f["log_amount"] == pytest.approx(math.log1p(26000))
-    assert f["log_deductible"] == pytest.approx(math.log1p(1068))
-    assert f["claim_days"] == 7.0
-    assert f["admit_days"] == 6.0
-    assert f["is_inpatient"] == 1.0
-    assert f["n_diag"] == 2.0 and f["n_proc"] == 1.0
-    assert f["has_operating"] == 1.0 and f["has_other"] == 1.0 and f["att_is_op"] == 1.0
-    assert f["age"] == pytest.approx((dt.date(2009, 4, 12) - dt.date(1943, 1, 1)).days / 365.25)
-    assert f["n_chronic"] == 2.0 and f["renal"] == 1.0
-    assert f["part_a_months"] == 12.0 and f["part_b_months"] == 6.0
-    assert f["admit_dx_matches"] == 1.0
-    assert f["dx_px_rarity"] == pytest.approx(ctx.pair_rarity("4019", "7092"))
-    assert f["amount_vs_dx"] == pytest.approx(math.log1p(26000) - ctx.typical_log_amount(1, "4019"))
-
-
-def check_one_claim_parity(claim, bene, ctx):
-    f = claim_features(claim, bene, ctx)
-    b = claim_features_batch(as_frame(claim, bene), ctx).iloc[0]
-    assert_close([f[k] for k in CLAIM_FEATURES], b.to_numpy())
+# ------------------------------------------------------------------------------ rules
+def rule_feats(new_payee=1.0, n_out=5, ratio=10.0):
+    f = dict.fromkeys(FEATURES, 0.0)
+    f.update(s_new_payee=new_payee, s_log_n_out=math.log1p(n_out), s_amount_vs_usual=math.log(ratio))
     return f
 
 
-@pytest.mark.parametrize("proc", [7092.0, "7092", "7092.0", np.float64(7092.0)])
-def test_float_and_string_procedure_codes_are_the_same(proc, ctx):
-    f = check_one_claim_parity(base_claim(ClmProcedureCode_1=proc), base_bene(), ctx)
-    ref = claim_features(base_claim(ClmProcedureCode_1="7092"), base_bene(), ctx)
-    assert f == ref
-    assert ctx.pair_counts.get("4019|7092", 0) > 0 or f["dx_px_rarity"] == pytest.approx(math.log1p(ctx.pair_total))
-
-
-def test_float_procedure_codes_in_mixed_object_column_batch(ctx):
-    rows = [base_claim(ClmProcedureCode_1=v, ClaimID=f"C{i}") for i, v in enumerate([7092.0, "7092", None])]
-    df = pd.concat([as_frame(r, base_bene()) for r in rows], ignore_index=True)
-    out = claim_features_batch(df, ctx)
-    assert out["dx_px_rarity"].iloc[0] == out["dx_px_rarity"].iloc[1]
-    assert out["n_proc"].tolist() == [1.0, 1.0, 0.0]
-
-
-@pytest.mark.parametrize("over,checks", [
-    ({"ClaimStartDt": None}, {"claim_days": 1.0, "age": 0.0}),
-    ({"ClaimStartDt": "NA"}, {"claim_days": 1.0, "age": 0.0}),
-    ({"ClaimEndDt": None}, {"claim_days": 1.0}),
-    ({"AdmissionDt": None}, {"admit_days": 0.0}),
-    ({"DischargeDt": "NA"}, {"admit_days": 0.0}),
-    ({"ClaimEndDt": "2009-04-01"}, {"claim_days": 0.0}),           # end before start clips at 0
-    ({"ClaimEndDt": "2011-04-12"}, {"claim_days": MAX_CLAIM_DAYS}),  # absurdly long clips at max
-    ({"DischargeDt": "2009-04-01"}, {"admit_days": 0.0}),
-    ({"InscClaimAmtReimbursed": -500.0}, {"log_amount": 0.0}),
-    ({"InscClaimAmtReimbursed": float("nan")}, {"log_amount": 0.0}),
-    ({"InscClaimAmtReimbursed": None}, {"log_amount": 0.0}),
-    ({"DeductibleAmtPaid": float("nan")}, {"log_deductible": 0.0}),
-    ({"DeductibleAmtPaid": -10.0}, {"log_deductible": 0.0}),
-    ({"AttendingPhysician": None, "OperatingPhysician": None}, {"att_is_op": 0.0, "has_operating": 0.0}),
-    ({"AttendingPhysician": "NA", "OperatingPhysician": "NA"}, {"att_is_op": 0.0, "has_operating": 0.0}),
-    ({"OperatingPhysician": "PHY2"}, {"att_is_op": 0.0, "has_operating": 1.0}),
-    ({"ClmAdmitDiagnosisCode": None}, {"admit_dx_matches": 0.0}),
-    ({"ClmAdmitDiagnosisCode": "NA", "ClmDiagnosisCode_1": "NA"}, {"admit_dx_matches": 0.0, "n_diag": 0.0}),
-    ({"ClmAdmitDiagnosisCode": None, "ClmDiagnosisCode_1": None}, {"admit_dx_matches": 0.0, "n_diag": 0.0}),
-    ({"ClmDiagnosisCode_2": "NA", "ClmDiagnosisCode_3": "", "ClmDiagnosisCode_4": "V5866"}, {"n_diag": 2.0}),
+@pytest.mark.parametrize("kw,fires", [
+    ({}, True), ({"ratio": 50}, True), ({"n_out": 100}, True),
+    ({"new_payee": 0.0}, False), ({"n_out": 4}, False), ({"ratio": 9.9}, False), ({"ratio": 0.1}, False),
 ])
-def test_edge_cases_stream_equals_batch(over, checks, ctx):
-    f = check_one_claim_parity(base_claim(**over), base_bene(), ctx)
-    for k, v in checks.items():
-        assert f[k] == pytest.approx(v), k
+def test_big_new_payee_rule(kw, fires):
+    assert (rule_hits(rule_feats(**kw), CTX) == ["big_new_payee"]) is fires
+    assert set(rule_hits(rule_feats(**kw), CTX)) <= set(RULES)
 
 
-def test_missing_dob_gives_age_zero(ctx):
-    f = check_one_claim_parity(base_claim(), base_bene(DOB=None), ctx)
-    assert f["age"] == 0.0
+def test_rule_accepts_vectors_and_float32():
+    f = rule_feats()
+    v = np.array([f[k] for k in FEATURES])
+    assert rule_hits(v, CTX) == rule_hits(v.astype(np.float32), CTX) == rule_hits(f, CTX) == ["big_new_payee"]
 
 
-def test_missing_beneficiary_numbers_default_to_zero(ctx):
-    bene = base_bene(RenalDiseaseIndicator=float("nan"), NoOfMonths_PartACov=float("nan"))
-    f = check_one_claim_parity(base_claim(), bene, ctx)
-    assert f["renal"] == 0.0 and f["part_a_months"] == 0.0
+def test_rule_ratio_comes_from_context():
+    strict = FeatureContext(usd_per_unit={"US Dollar": 1.0}, rule_big_new_payee_ratio=100.0)
+    assert rule_hits(rule_feats(ratio=50), strict) == []
+    assert rule_hits(rule_feats(ratio=100.0001), strict) == ["big_new_payee"]
 
 
-def test_unseen_diagnosis_code(ctx):
-    f = check_one_claim_parity(base_claim(ClmDiagnosisCode_1="ZZZ99", ClmAdmitDiagnosisCode="ZZZ99"),
-                               base_bene(), ctx)
-    assert f["dx_rarity"] == pytest.approx(math.log1p(ctx.dx_total))
-    assert f["dx_px_rarity"] == pytest.approx(math.log1p(ctx.pair_total))
-    assert f["amount_vs_dx"] == pytest.approx(math.log1p(26000) - ctx.global_amount_median["1"])
-    assert f["admit_dx_matches"] == 1.0
+def test_rule_fires_on_streamed_payments():
+    fe = FeatureEngine(CTX)
+    for i in range(5):
+        fe.observe(float(i), "A", "B", 100.0, "ACH", True, False, 9)
+    big_new = fe.observe(10.0, "A", "NEW", 5000.0, "Wire", True, False, 9)
+    assert rule_hits(big_new, CTX) == ["big_new_payee"]
+    big_old = fe.observe(11.0, "A", "B", 50000.0, "Wire", True, False, 9)
+    assert rule_hits(big_old, CTX) == []                         # not a new payee
 
 
-def test_unseen_codes_are_rarer_than_seen(ctx, live_claims):
-    out = claim_features_batch(live_claims, ctx)
-    dx = live_claims["ClmDiagnosisCode_1"].map(_code)
-    unseen = dx.isin(["99999", "V9999", "E0000"])
-    assert unseen.any()
-    assert out.loc[unseen, "dx_rarity"].min() > out.loc[~unseen & (dx != "NA"), "dx_rarity"].max()
+def test_rule_needs_five_prior_payments():
+    fe = FeatureEngine(CTX)
+    for i in range(4):
+        fe.observe(float(i), "A", "B", 100.0, "ACH", True, False, 9)
+    assert rule_hits(fe.observe(10.0, "A", "NEW", 5000.0, "Wire", True, False, 9), CTX) == []
 
 
-def test_claim_features_all_finite(live_claims, ctx):
-    assert np.isfinite(claim_features_batch(live_claims, ctx).to_numpy()).all()
+def test_customers_in_synthetic_data_trip_the_rule(aml):
+    from conftest import CUSTOMER_1, CUSTOMER_2
+
+    for cust in (CUSTOMER_1, CUSTOMER_2):
+        m = (aml.tx["sender"] == ":".join(cust)).values & (aml.tx["amount_paid"] == 5000.0).values
+        assert m.sum() == 1 and aml.split[m][0] == "test"
+        assert rule_hits(aml.X[m][0], aml.ctx) == ["big_new_payee"]
 
 
-# ------------------------------------------------------------------------------ hard rules
-@pytest.mark.parametrize("claim_over,bene_over,expected", [
-    ({}, {}, []),
-    ({}, {"DOD": "2009-04-01"}, ["after_death"]),
-    ({}, {"DOD": "2009-04-12"}, []),                       # same day as death is allowed
-    ({"ClaimStartDt": None}, {"DOD": "2009-04-01"}, []),
-    ({"ClaimEndDt": "2009-04-11"}, {}, ["end_before_start"]),
-    ({"ClaimEndDt": "2009-04-12"}, {}, []),
-    ({"DischargeDt": "2009-04-11"}, {}, ["discharge_before_admission"]),
-    ({"DischargeDt": "NA"}, {}, []),
-    ({"AttendingPhysician": None}, {}, ["missing_attending"]),
-    ({"AttendingPhysician": "NA"}, {}, ["missing_attending"]),
-    ({"AttendingPhysician": "  "}, {}, ["missing_attending"]),
-    ({"ClaimEndDt": "2009-04-01", "DischargeDt": "2009-04-01", "AttendingPhysician": None},
-     {"DOD": "2009-01-01", "NoOfMonths_PartACov": 0},
-     ["after_death", "end_before_start", "discharge_before_admission", "missing_attending", "no_coverage"]),
-])
-def test_hard_errors_rules(claim_over, bene_over, expected):
-    claim, bene = base_claim(**claim_over), base_bene(**bene_over)
-    assert hard_errors(claim, bene) == expected
-    b = hard_errors_batch(as_frame(claim, bene)).iloc[0]
-    assert [r for r in RULES_NO_DUP if b[r]] == expected
-    assert not b["duplicate"]
-    assert all(r in HARD_RULES for r in expected)
+def test_slightly_out_of_order_payment_is_clamped():
+    """A payment 30 min older than the last one: the gap is treated as 0, never negative or 'un-decayed'."""
+    fe = FeatureEngine(CTX)
+    fe.observe(600.0, "A", "B", 10.0, "ACH", True, False, 10)
+    f = dict(zip(FEATURES, fe.observe(570.0, "A", "C", 10.0, "ACH", True, False, 9)))
+    assert f["s_log_idle_h"] == 0.0 and f["s_recent_out"] == pytest.approx(1.0)
 
 
-@pytest.mark.parametrize("inpatient,part_a,part_b,fires", [
-    (1, 0, 12, True),             # inpatient needs Part A
-    (1, 12, 0, False),
-    (0, 12, 0, True),             # outpatient needs Part B
-    (0, 0, 12, False),
-    (1, -1, 12, True),
-    (0, 12, -3, True),
-    (1, 1, 1, False),
-    (0, 0.5, 0.5, False),
-    (1, None, 12, False),         # missing months -> no fire
-    (0, 12, float("nan"), False),
-    (1, float("nan"), 0, False),  # only the relevant part counts, even when it is missing
-])
-def test_no_coverage_rule(inpatient, part_a, part_b, fires):
-    claim = base_claim(is_inpatient=inpatient)
-    if not inpatient:
-        claim.update(AdmissionDt=None, DischargeDt=None)
-    bene = base_bene(NoOfMonths_PartACov=part_a, NoOfMonths_PartBCov=part_b)
-    assert ("no_coverage" in hard_errors(claim, bene)) is fires
-    df = as_frame(claim, bene)
-    for c in ["NoOfMonths_PartACov", "NoOfMonths_PartBCov"]:   # loader-style numeric columns (missing = NaN)
-        df[c] = df[c].astype(float)
-    assert bool(hard_errors_batch(df).iloc[0]["no_coverage"]) is fires
-    assert "no_coverage" in HARD_RULES
-
-
-def test_no_coverage_batch_accepts_none_months_in_object_column():
-    df = as_frame(base_claim(), base_bene(NoOfMonths_PartACov=None))
-    assert df["NoOfMonths_PartACov"].dtype == object
-    assert claim_features_batch(df, FeatureContext())["part_a_months"].iloc[0] == 0.0   # features cope
-    assert not hard_errors_batch(df).iloc[0]["no_coverage"]
-
-
-def test_no_coverage_rule_with_string_months_in_api_dicts():
-    assert "no_coverage" in hard_errors(base_claim(is_inpatient=0), base_bene(NoOfMonths_PartBCov="0"))
-    assert hard_errors(base_claim(is_inpatient=0), base_bene(NoOfMonths_PartBCov="NA")) == []
-
-
-def test_hard_errors_batch_equals_stream(live_claims):
-    batch = hard_errors_batch(live_claims)
-    assert list(batch.columns) == RULES_NO_DUP + ["duplicate"]
-    assert (batch.dtypes == bool).all()
-    for i, r in enumerate(live_claims.to_dict("records")):
-        expected = hard_errors(r, r)
-        assert [k for k in RULES_NO_DUP if batch.iloc[i][k]] == expected
-        assert hard_errors(api_style(r), api_style(r)) == expected
-    # the synthetic generator injects every rule at least once (incl. 0 coverage months)
-    assert batch[RULES_NO_DUP].any().all()
-
-
-def test_no_coverage_parity_with_missing_months(live_claims):
-    df = live_claims.copy()
-    df["NoOfMonths_PartACov"] = df["NoOfMonths_PartACov"].astype(float)
-    df.loc[df.index[::7], "NoOfMonths_PartACov"] = float("nan")
-    df.loc[df.index[::5], "NoOfMonths_PartBCov"] = -1
-    batch = hard_errors_batch(df)
-    for i, r in enumerate(df.to_dict("records")):
-        assert ("no_coverage" in hard_errors(r, r)) == bool(batch.iloc[i]["no_coverage"])
-    assert batch["no_coverage"].any() and not batch["no_coverage"].all()
-
-
-def test_duplicate_batch_marks_later_copies_only(live_claims):
-    df = pd.concat([live_claims.iloc[:5], live_claims.iloc[[1, 3]].assign(ClaimID=["X1", "X2"])],
-                   ignore_index=True)
-    dup = hard_errors_batch(df)["duplicate"]
-    assert dup.tolist() == [False] * 5 + [True, True]
-
-
-def test_duplicate_stream_equals_batch(live_claims):
-    df = live_claims[live_claims["InscClaimAmtReimbursed"].notna()]
-    copies = df.sample(30, random_state=0).assign(ClaimID=lambda d: "DUP" + d["ClaimID"])
-    df = pd.concat([df, copies], ignore_index=True)
-    batch = hard_errors_batch(df)["duplicate"].tolist()
-    idx = DuplicateIndex()
-    stream = [idx.check_and_add(duplicate_key(r, r["BeneID"], r["Provider"])) for r in df.to_dict("records")]
-    assert stream == batch
-    assert sum(stream) >= 30
-
-
-def test_duplicate_key_normalises_codes_and_amounts():
-    a = duplicate_key(base_claim(ClmDiagnosisCode_1=4019.0, InscClaimAmtReimbursed=100), "B", "P")
-    b = duplicate_key(base_claim(ClmDiagnosisCode_1="4019", InscClaimAmtReimbursed="100.00"), "B", "P")
-    assert a == b == "B|P|2009-04-12|100.00|4019"
-    assert duplicate_key(base_claim(ClaimStartDt=None), "B", "P").split("|")[2] == "NA"
-    assert duplicate_key(base_claim(), "B", "P") != duplicate_key(base_claim(), "B", "P2")
-    assert duplicate_key(base_claim(), "B", "P") != duplicate_key(base_claim(InscClaimAmtReimbursed=101), "B", "P")
-
-
-def test_duplicate_index_basic():
-    idx = DuplicateIndex()
-    assert idx.check_and_add("a") is False
-    assert idx.check_and_add("a") is True
-    assert idx.check_and_add("b") is False
-
-
-def test_duplicate_index_evicts_oldest_at_max_size():
-    idx = DuplicateIndex(max_size=3)
-    for k in "abc":
-        assert not idx.check_and_add(k)
-    assert not idx.check_and_add("d")      # evicts "a"
-    assert len(idx._seen) == 3
-    assert idx.check_and_add("b") and idx.check_and_add("c") and idx.check_and_add("d")
-    assert not idx.check_and_add("a")      # forgotten, so new again; evicts "b"
-    assert not idx.check_and_add("b")
-    assert len(idx._seen) == 3
-
-
-# ------------------------------------------------------------------------------ provider state parity
-def stream_provider_states(df, feats, thr):
-    states = {}
-    for (_, r), (_, f) in zip(df.iterrows(), feats.iterrows()):
-        st = states.setdefault(r["Provider"], ProviderState())
-        st.update(f.to_dict(), r["BeneID"], attending_key(r), thr)
-    return states
-
-
-@pytest.mark.parametrize("seed", [21, 22])
-def test_provider_state_equals_batch(seed, ctx):
-    df = make_claims(seed=seed, n=300, n_providers=6, unseen_share=0.1)
-    feats = claim_features_batch(df, ctx)
-    batch = provider_features_batch(df, feats, ctx.rare_pair_threshold)
-    assert list(batch.columns) == PROVIDER_FEATURES
-    assert list(batch.index) == sorted(df["Provider"].unique())
-    states = stream_provider_states(df, feats, ctx.rare_pair_threshold)
-    for prv, st in states.items():
-        f = st.features()
-        assert list(f) == PROVIDER_FEATURES
-        assert_close([f[k] for k in PROVIDER_FEATURES], batch.loc[prv].to_numpy())
-        assert st.n == (df["Provider"] == prv).sum()
-
-
-def test_provider_state_from_streaming_claim_features(live_claims, ctx):
-    """End to end streaming path (claim_features -> ProviderState) equals the full batch path."""
-    states = {}
-    for r in live_claims.to_dict("records"):
-        st = states.setdefault(r["Provider"], ProviderState())
-        st.update(claim_features(r, r, ctx), r["BeneID"], attending_key(r), ctx.rare_pair_threshold)
-    batch = provider_features_batch(live_claims, claim_features_batch(live_claims, ctx), ctx.rare_pair_threshold)
-    for prv, st in states.items():
-        assert_close([st.features()[k] for k in PROVIDER_FEATURES], batch.loc[prv].to_numpy())
-
-
-def test_provider_state_counts_and_missing_attending():
-    st = ProviderState()
-    base = dict.fromkeys(CLAIM_FEATURES, 0.0)
-    st.update({**base, "log_amount": 2.0, "is_inpatient": 1.0, "admit_days": 4.0, "dx_px_rarity": 9.0},
-              "B1", "D1", 5.0)
-    st.update({**base, "log_amount": 4.0, "att_is_op": 1.0}, "B1", None, 5.0)
-    st.update({**base, "log_amount": 3.0}, "B2", "D1", 5.0)
-    f = st.features()
-    assert f["log_claims"] == pytest.approx(math.log1p(3))
-    assert f["mean_log_amount"] == pytest.approx(3.0)
-    assert f["max_log_amount"] == 4.0
-    assert f["inpatient_share"] == pytest.approx(1 / 3)
-    assert f["mean_admit_days"] == 4.0          # averaged over inpatient claims only
-    assert f["log_unique_benes"] == pytest.approx(math.log1p(2))
-    assert f["claims_per_bene"] == 1.5
-    assert f["log_unique_attending"] == pytest.approx(math.log1p(1))
-    assert f["claims_per_attending"] == 2.0     # claims WITH an attending / distinct attendings
-    assert f["missing_attending_share"] == pytest.approx(1 / 3)
-    assert f["rare_pair_share"] == pytest.approx(1 / 3)
-    assert f["att_is_op_share"] == pytest.approx(1 / 3)
-
-
-def test_empty_provider_state_has_finite_features():
-    f = ProviderState().features()
-    assert list(f) == PROVIDER_FEATURES
-    assert all(math.isfinite(v) for v in f.values())
-    assert f["log_claims"] == 0.0
-
-
-def test_provider_batch_all_attending_missing(ctx):
-    df = make_claims(seed=5, n=20, n_providers=1, messy=False)
-    df["AttendingPhysician"] = None
-    feats = claim_features_batch(df, ctx)
-    batch = provider_features_batch(df, feats, ctx.rare_pair_threshold).iloc[0]
-    st = stream_provider_states(df, feats, ctx.rare_pair_threshold)["PRV51000"].features()
-    assert batch["missing_attending_share"] == 1.0 and batch["claims_per_attending"] == 0.0
-    assert_close([st[k] for k in PROVIDER_FEATURES], batch.to_numpy())
-
-
-@pytest.mark.parametrize("fractions", [(0.25, 0.5, 0.75, 1.0), (0.1, 0.33, 0.9)])
-def test_provider_prefixes_equal_stream_on_first_ceil_f_n_claims(fractions, ctx):
-    df = make_claims(seed=31, n=230, n_providers=7, unseen_share=0.1)
-    feats = claim_features_batch(df, ctx)
-    thr = ctx.rare_pair_threshold
-    pref = provider_features_prefixes(df, feats, thr, fractions=fractions)
-    assert len(pref) == df["Provider"].nunique() * len(fractions)
-    assert sorted(pref["fraction"].unique()) == sorted(float(f) for f in fractions)
-    for prv, grp in df.groupby("Provider"):
-        rows = list(grp.index)
-        for f in fractions:
-            k = math.ceil(f * len(rows))
-            st = ProviderState()
-            for i in rows[:k]:
-                r = df.loc[i]
-                st.update(feats.loc[i].to_dict(), r["BeneID"], attending_key(r), thr)
-            got = pref[(pref.index == prv) & (pref["fraction"] == float(f))]
-            assert len(got) == 1
-            assert st.n == k
-            assert_close([st.features()[c] for c in PROVIDER_FEATURES], got[PROVIDER_FEATURES].iloc[0].to_numpy())
-
-
-def test_provider_prefix_full_fraction_equals_batch(live_claims, ctx):
-    feats = claim_features_batch(live_claims, ctx)
-    full = provider_features_batch(live_claims, feats, ctx.rare_pair_threshold)
-    pref = provider_features_prefixes(live_claims, feats, ctx.rare_pair_threshold, fractions=(1.0,))
-    assert_close(pref[PROVIDER_FEATURES].sort_index(), full.sort_index())
+def test_out_of_order_payment_does_not_crash():
+    fe = FeatureEngine(CTX)
+    fe.observe(600.0, "A", "B", 10.0, "ACH", True, False, 10)
+    f = dict(zip(FEATURES, fe.observe(400.0, "A", "D", 10.0, "ACH", True, False, 6)))
+    assert f["s_log_idle_h"] >= 0

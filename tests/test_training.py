@@ -1,164 +1,187 @@
-"""training.py: threshold tuning, ranking metrics and the stream file, on small synthetic inputs only."""
+"""training.py pieces on the synthetic AMLworld data (no full training run)."""
 import numpy as np
 import pandas as pd
 import pytest
 
-from claimsense import training
-from claimsense.training import (STREAM_COLUMNS, decision_summary, hold_curve, ranking_metrics, simulate_stream,
-                                 tune_provider_threshold, write_stream)
-from claimsense.simulator import load_stream
+from scamshield.features import FEATURES, FeatureContext, FeatureEngine, rule_hits
+from scamshield.fusion import ALLOW, HOLD, WARN, decide
+from scamshield.training import (
+    AE_IDX, HISTORY_COLUMNS, decisions, ranking_metrics, rule_matrix, scheme_hits, summarise, train_risk_model,
+    tune_hold_threshold, write_history, write_stream,
+)
 
-from conftest import make_claims
-
-ANOM_T, MIN_CLAIMS = 1.0, 10
-
-
-def group(n, risk, label, rules="missing_attending", anomaly=0.0, claims=50):
-    return pd.DataFrame({"anomaly": [anomaly] * n, "rules": [rules] * n, "provider_claims": [claims] * n,
-                         "provider_risk": [risk] * n, "label": [label] * n})
+from conftest import policy_for, scorers
 
 
-@pytest.fixture
-def sim():
-    """100 flagged+ready claims: 10 @0.9 fraud, 10 @0.6 fraud, 10 @0.5 honest, 70 @0.1 honest,
-    plus noise that must never be held: unflagged high-risk honest claims and not-ready claims."""
-    return pd.concat([
-        group(10, 0.9, 1), group(10, 0.6, 1), group(10, 0.5, 0), group(70, 0.1, 0),
-        group(20, 0.99, 0, rules="", anomaly=0.5),               # not flagged (no rule, anomaly below)
-        group(20, 0.99, 0, rules=None, anomaly=0.2),             # NaN rules = no rule
-        group(20, 0.99, 0, claims=MIN_CLAIMS - 1),               # flagged but provider not ready
-        group(5, 0.95, 1, rules="", anomaly=ANOM_T),             # flagged by anomaly (inclusive threshold)
-        group(5, np.nan, 0),                                     # no risk score
-    ], ignore_index=True)
-
-
-def test_hold_curve_shape_and_monotonic(sim):
-    c = hold_curve(sim, ANOM_T, MIN_CLAIMS)
-    assert list(c.columns) == ["threshold", "hold_share", "precision", "held"]
-    assert c["threshold"].iloc[0] == 0.30 and c["threshold"].iloc[-1] == 0.99 and len(c) == 70
-    assert (np.diff(c["held"]) <= 0).all()
-    np.testing.assert_allclose(c["hold_share"], c["held"] / len(sim))
-
-
-def test_hold_curve_counts(sim):
-    c = hold_curve(sim, ANOM_T, MIN_CLAIMS).set_index("threshold")
-    assert c.loc[0.50, "held"] == 35        # 10 + 10 + 10 + 5 anomaly-flagged
-    assert c.loc[0.50, "precision"] == pytest.approx(25 / 35)
-    assert c.loc[0.51, "held"] == 25 and c.loc[0.51, "precision"] == 1.0
-    assert c.loc[0.61, "held"] == 15
-    assert c.loc[0.96, "held"] == 0 and np.isnan(c.loc[0.96, "precision"])
-
-
-@pytest.mark.parametrize("cap,min_prec,expected", [
-    # 170 claims; held at t<=0.50: 35 (precision 25/35 = 0.714), t<=0.60: 25, t<=0.90: 15, t<=0.95: 5
-    (0.50, 0.70, 0.30),     # 35/170 = 0.206 <= cap and 0.714 >= 0.70 from the lowest threshold up
-    (0.50, 0.72, 0.51),     # precision binds
-    (0.20, 0.70, 0.51),     # cap binds: 35/170 > 0.20, 25/170 = 0.147
-    (0.10, 0.70, 0.61),     # 15/170 = 0.088
-    (0.05, 0.70, 0.91),     # 5/170 = 0.029 (only the anomaly-flagged 0.95 group)
-    (0.50, 0.60, 0.30),     # everything up from 0.30 meets 0.6 precision
-    (0.50, 1.01, 0.95),     # impossible -> 0.95
-    (0.0, 0.70, 0.95),      # cap 0 is never met by a non-empty hold set (and empty sets have NaN precision)
-])
-def test_tune_provider_threshold(sim, cap, min_prec, expected):
-    assert tune_provider_threshold(sim, ANOM_T, MIN_CLAIMS, cap, min_prec) == pytest.approx(expected)
-
-
-def test_tune_returns_lowest_threshold_meeting_both(sim):
-    t = tune_provider_threshold(sim, ANOM_T, MIN_CLAIMS, 0.2, 0.7)
-    c = hold_curve(sim, ANOM_T, MIN_CLAIMS)
-    ok = c[(c["precision"] >= 0.7) & (c["hold_share"] <= 0.2)]
-    assert t == ok["threshold"].min()
-    lower = c[c["threshold"] < t]
-    assert not ((lower["precision"] >= 0.7) & (lower["hold_share"] <= 0.2)).any()
-
-
-def test_tune_on_sim_with_no_flagged_claims():
-    s = group(50, 0.9, 1, rules="", anomaly=0.0)
-    assert tune_provider_threshold(s, ANOM_T, MIN_CLAIMS) == 0.95
-
-
-def test_ranking_metrics_known_example():
-    y = np.array([1, 0, 1, 0])
-    p = np.array([0.9, 0.8, 0.7, 0.1])
-    m = ranking_metrics(y, p, top_frac=0.5)
+# ------------------------------------------------------------------------------ metrics
+def test_ranking_metrics_toy():
+    m = ranking_metrics(np.array([1, 0, 1, 0]), np.array([0.9, 0.8, 0.7, 0.1]))
     assert m["n"] == 4 and m["positives"] == 2 and m["base_rate"] == 0.5
-    assert m["roc_auc"] == pytest.approx(0.75)                   # 3 of 4 positive/negative pairs ordered
-    assert m["pr_auc"] == pytest.approx((1 + 2 / 3) / 2)         # precision at each hit: 1/1, 2/3
-    assert m["precision_top50pct"] == 0.5 and m["recall_top50pct"] == 0.5
+    assert m["roc_auc"] == pytest.approx(0.75)
+    assert m["pr_auc"] == pytest.approx((1 + 2 / 3) / 2)
+    # best F1 is at the top 3: precision 2/3, recall 1 -> F1 0.8
+    assert m["best_f1"] == pytest.approx(0.8)
+    assert m["best_f1_precision"] == pytest.approx(2 / 3) and m["best_f1_recall"] == 1.0
+    assert m["best_f1_threshold"] == 0.7
 
 
-def test_ranking_metrics_perfect_and_default_top5():
-    y = np.array([1] * 5 + [0] * 95)
-    p = np.linspace(1, 0, 100)
-    m = ranking_metrics(y, p)
-    assert m["roc_auc"] == 1.0 and m["pr_auc"] == 1.0
-    assert m["precision_top5pct"] == 1.0 and m["recall_top5pct"] == 1.0
+def test_ranking_metrics_perfect():
+    y = np.array([0] * 90 + [1] * 10)
+    m = ranking_metrics(y, np.arange(100) / 100)
+    assert m["roc_auc"] == 1.0 and m["pr_auc"] == pytest.approx(1.0) and m["best_f1"] == 1.0
+    assert m["best_f1_threshold"] == 0.9
 
 
-def test_ranking_metrics_top_k_at_least_one():
-    m = ranking_metrics(np.array([0, 1, 0]), np.array([0.1, 0.9, 0.2]), top_frac=0.01)
-    assert m["precision_top1pct"] == 1.0 and m["recall_top1pct"] == 1.0
+# ------------------------------------------------------------------------------ fusion + rules parity
+def test_rule_matrix_equals_rule_hits_on_engine_features(aml):
+    vec = rule_matrix(aml.X, aml.ctx)
+    one = np.array([bool(rule_hits(x, aml.ctx)) for x in aml.X])
+    np.testing.assert_array_equal(vec, one)
+    assert vec.sum() >= 2
 
 
-def test_decision_summary():
-    s = pd.DataFrame({"action": ["PAY", "PAY", "HOLD_FOR_REVIEW", "RETURN_WITH_FIX"], "label": [0, 1, 1, 0],
-                      "amount": [10.0, 20.0, 300.0, 40.0]})
-    d = decision_summary(s)
-    assert d["claims"] == 4 and d["mix"] == {"PAY": 0.5, "HOLD_FOR_REVIEW": 0.25, "RETURN_WITH_FIX": 0.25}
-    assert d["hold_precision_flagged_provider"] == 1.0 and d["return_share_from_flagged_provider"] == 0.0
-    assert d["dollars_held"] == 300.0 and d["base_rate_flagged_provider_claims"] == 0.5
-    assert decision_summary(s[s["action"] == "PAY"])["hold_precision_flagged_provider"] is None
+def test_rule_matrix_equals_rule_hits_on_crafted_edges():
+    ctx = FeatureContext(usd_per_unit={"US Dollar": 1.0})
+    rows = []
+    for new in (0.0, 1.0):
+        for n_out in (4, 5, 6, 50):
+            for ratio in (9.99, 10.0, 10.01, 1000.0):
+                f = dict.fromkeys(FEATURES, 0.0)
+                f.update(s_new_payee=new, s_log_n_out=np.log1p(n_out), s_amount_vs_usual=np.log(ratio))
+                rows.append([f[k] for k in FEATURES])
+    for dtype in (np.float64, np.float32):
+        X = np.array(rows, dtype=dtype)
+        np.testing.assert_array_equal(rule_matrix(X, ctx), [bool(rule_hits(x, ctx)) for x in X])
 
 
-# ------------------------------------------------------------------------------ stream file + simulated stream
-@pytest.fixture
-def split_claims():
-    c = make_claims(seed=9, n=120, n_providers=6, messy=False)
-    prov = sorted(c["Provider"].unique())
-    split = {p: ("test" if i % 2 else "train") for i, p in enumerate(prov)}
-    return c.assign(split=c["Provider"].map(split), label=c["Provider"].map(lambda p: int(p.endswith(("1", "3")))))
+def test_decisions_equal_decide_on_model_outputs(aml):
+    anomaly, risk = scorers(aml.models_dir)
+    pol = policy_for(aml.models_dir)
+    err, _, _ = anomaly.score(aml.X[:, AE_IDX])
+    r = risk.predict(aml.X)
+    rules = rule_matrix(aml.X, aml.ctx)
+    vec = decisions(r, err, rules, pol)
+    one = [decide(float(e), float(p), rule_hits(x, aml.ctx), pol).action for e, p, x in zip(err, r, aml.X)]
+    assert list(vec) == one
+    assert {ALLOW, WARN, HOLD} <= set(vec)
 
 
-def test_write_stream_only_test_providers_in_time_order(split_claims, tmp_path):
-    path = write_stream(split_claims, tmp_path)
-    s = pd.read_csv(path, dtype=str, keep_default_na=False)
-    assert list(s.columns) == STREAM_COLUMNS
-    assert "label" not in s.columns and "split" not in s.columns
-    test = split_claims[split_claims["split"] == "test"]
-    assert s["ClaimID"].tolist() == test["ClaimID"].tolist()
-    assert s["ClaimStartDt"].tolist() == sorted(s["ClaimStartDt"].tolist())
-    assert s["ClaimStartDt"].str.fullmatch(r"\d{4}-\d{2}-\d{2}").all()
+# ------------------------------------------------------------------------------ hold threshold
+def test_tune_hold_threshold_lowest_meeting_precision_and_cap():
+    y = np.array([1, 1, 1, 0, 1, 0, 0, 0, 0, 0] * 10)
+    risk = np.linspace(1, 0, 100)              # distinct scores, best first
+    t = tune_hold_threshold(y, risk, min_precision=0.6, cap=0.05)
+    held = risk >= t
+    assert held.sum() == 5 and y[held].mean() >= 0.6 and held.mean() <= 0.05
+    t2 = tune_hold_threshold(y, risk, min_precision=0.6, cap=0.5)
+    assert t2 < t                              # a bigger cap -> lower threshold, more caught
+    held2 = risk >= t2
+    assert y[held2].mean() >= 0.6 and held2.mean() <= 0.5
 
 
-def test_stream_file_round_trips_into_valid_api_claims(split_claims, tmp_path):
-    from claimsense.api.schemas import ClaimIn
-
-    rows = load_stream(write_stream(split_claims, tmp_path), limit=None)
-    assert len(rows) == (split_claims["split"] == "test").sum()
-    for r in rows:
-        c = ClaimIn(**r)
-        assert c.ClaimID == r["ClaimID"]
-        assert c.ClmProcedureCode_1 is None or not c.ClmProcedureCode_1.endswith(".0")
+def test_tune_hold_threshold_impossible_holds_nothing():
+    y = np.array([0, 0, 1])
+    risk = np.array([0.9, 0.8, 0.1])
+    t = tune_hold_threshold(y, risk, min_precision=0.9, cap=1.0)
+    assert t > risk.max() and not (risk >= t).any()
 
 
-def test_simulate_stream_matches_engine(split_claims, tiny_models_dir):
-    sim = simulate_stream(split_claims, None, tiny_models_dir, anomaly_threshold=1e9, provider_threshold=0.0,
-                          min_provider_claims=3, batch_size=16)
-    assert len(sim) == len(split_claims)
-    assert list(sim.columns) == ["ClaimID", "Provider", "label", "amount", "action", "anomaly", "provider_risk",
-                                 "provider_claims", "rules"]
-    assert sim["ClaimID"].tolist() == split_claims["ClaimID"].tolist()
-    # with only rules flagging, an action is non-PAY exactly when a rule fired
-    assert ((sim["action"] != "PAY") == (sim["rules"] != "")).all()
-    assert ((sim["action"] == "HOLD_FOR_REVIEW") == ((sim["rules"] != "") & (sim["provider_claims"] >= 3))).all()
-    counts = sim.groupby("Provider")["provider_claims"].max()
-    assert (counts == split_claims["Provider"].value_counts().reindex(counts.index)).all()
-    # tuning on it works end to end
-    t = tune_provider_threshold(sim, 1e9, 3, hold_cap=1.0, min_precision=0.0)
-    assert 0.30 <= t <= 0.95
+def test_tune_hold_threshold_respects_cap_and_precision_with_tied_scores():
+    y = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+    risk = np.array([0.9, 0.8, 0.8, 0.8, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
+    t = tune_hold_threshold(y, risk, min_precision=0.6, cap=0.2)
+    held = risk >= t
+    assert held.mean() <= 0.2 and (not held.any() or y[held].mean() >= 0.6)
 
 
-def test_training_module_imports_xgboost_first():
-    src = open(training.__file__).read()
-    assert src.index("import xgboost") < src.index("import torch")
+# ------------------------------------------------------------------------------ summaries
+def test_summarise():
+    y = np.array([1, 1, 0, 0, 1, 0])
+    act = np.array([HOLD, WARN, WARN, ALLOW, ALLOW, HOLD])
+    usd = np.array([100.0, 200.0, 5.0, 5.0, 300.0, 50.0])
+    s = summarise(y, act, usd)
+    assert s["payments"] == 6 and s["mix"] == {ALLOW: round(2 / 6, 5), WARN: round(2 / 6, 5), HOLD: round(2 / 6, 5)}
+    assert s["hold_precision"] == 0.5 and s["warn_precision"] == 0.5
+    assert s["laundering_recall_hold"] == pytest.approx(1 / 3)
+    assert s["laundering_recall_warn_or_hold"] == pytest.approx(2 / 3)
+    assert s["laundered_usd_total"] == 600.0 and s["laundered_usd_held"] == 100.0
+    assert s["base_rate"] == 0.5 and "schemes_disrupted" not in s
+    none = summarise(y, np.array([ALLOW] * 6), usd)
+    assert none["hold_precision"] is None and none["warn_precision"] is None
+
+
+def test_scheme_hits_and_summary(aml):
+    train = aml.split == "train"
+    n = int(train.sum())
+    all_held = scheme_hits(aml.tx, train, np.array([HOLD] * n), aml.raw_dir)
+    none_held = scheme_hits(aml.tx, train, np.array([ALLOW] * n), aml.raw_dir)
+    in_train = [k for k, att in aml.attempts if att[0].ts < pd.Timestamp("2022-09-05")]
+    assert sorted(all_held["pattern"]) == sorted(in_train)
+    assert all_held["hit"].all() and not none_held["hit"].any()
+    s = summarise(aml.y[train], np.array([HOLD] * n), np.ones(n), all_held)
+    assert s["schemes_disrupted_total"] == f"{len(in_train)}/{len(in_train)}"
+    # holding a single payment of an attempt breaks that chain
+    act = np.array([ALLOW] * n)
+    first_fan_in = aml.attempts[0][1][0]
+    idx = np.flatnonzero((aml.tx["ts"][train] == first_fan_in.ts).values &
+                         (aml.tx["amount_paid"][train] == first_fan_in.amount_paid).values)
+    act[idx] = HOLD
+    hits = scheme_hits(aml.tx, train, act, aml.raw_dir).set_index("pattern")["hit"]
+    assert hits["FAN-IN"] and not hits["CYCLE"]
+
+
+# ------------------------------------------------------------------------------ files for the API / simulator
+def test_write_history_excludes_live_days_and_labels(aml, tmp_path):
+    p = write_history(aml.tx, aml.split, tmp_path)
+    h = pd.read_csv(p, dtype=str)
+    assert list(h.columns) == HISTORY_COLUMNS and "label" not in h.columns
+    assert len(h) == int((aml.split != "test").sum())
+    assert h["ts"].str.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}").all()
+    assert h["ts"].tolist() == sorted(h["ts"].tolist()) and h["ts"].max() < "2022-09-07"
+    assert (h["from_bank"].str.len() >= 3).all()                # leading zeros kept
+    # same order as training: replaying it gives training's features for those rows
+    hist = pd.read_csv(p, dtype={"from_bank": str, "to_bank": str})
+    hist["ts"] = pd.to_datetime(hist["ts"])
+    np.testing.assert_array_equal(FeatureEngine(aml.ctx).run(hist), aml.X[aml.split != "test"])
+
+
+def test_write_stream_live_days_without_labels(aml, tmp_path):
+    p = write_stream(aml.tx, aml.split, tmp_path)
+    s = pd.read_csv(p, dtype=str, keep_default_na=False)
+    assert "label" not in s.columns
+    assert {"from_acct", "to_acct", "amount_received", "currency_received", "sender", "receiver"} <= set(s.columns)
+    assert len(s) == int((aml.split == "test").sum()) and s["ts"].min() >= "2022-09-07"
+    assert s["ts"].tolist() == sorted(s["ts"].tolist())
+
+
+# ------------------------------------------------------------------------------ risk model
+@pytest.fixture(scope="module")
+def trained(aml):
+    return train_risk_model(aml.X, aml.y, aml.split, neg_sample=0.5, seed=1)
+
+
+def test_train_risk_model_trims_to_best_iteration(trained):
+    booster, meta = trained
+    assert meta["trees"] == meta["best_iteration"] + 1
+    assert booster.num_boosted_rounds() == meta["trees"]
+    assert booster.feature_names == FEATURES and meta["features"] == FEATURES
+    assert set(meta["importance_gain"]) == set(FEATURES) and meta["negative_sample"] == 0.5
+
+
+def test_trained_booster_round_trips_through_the_risk_scorer(trained, aml, tmp_path):
+    import json
+
+    from scamshield.inference.risk import load_risk_scorer
+
+    booster, meta = trained
+    booster.save_model(str(tmp_path / "risk_xgb.json"))
+    (tmp_path / "risk_meta.json").write_text(json.dumps(meta))
+    s = load_risk_scorer(tmp_path)
+    assert s.booster.num_boosted_rounds() == meta["trees"]
+    np.testing.assert_allclose(s.predict(aml.X), booster.inplace_predict(aml.X), rtol=0, atol=1e-7)
+
+
+def test_train_risk_model_is_deterministic(trained, aml):
+    b2, m2 = train_risk_model(aml.X, aml.y, aml.split, neg_sample=0.5, seed=1)
+    assert m2["trees"] == trained[1]["trees"]
+    np.testing.assert_array_equal(b2.inplace_predict(aml.X), trained[0].inplace_predict(aml.X))

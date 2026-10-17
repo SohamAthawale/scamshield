@@ -1,6 +1,6 @@
 """Create ./secrets (keys, JWT secret, service token, demo users). Run once on the VM; never commit it.
 
-    python3 scripts/make_secrets.py --provider-id PRV55215
+    python3 scripts/make_secrets.py --customer-account 0119:812345678
 
 Demo passwords are written to secrets/demo_passwords.txt (readable only by you), not printed.
 """
@@ -13,21 +13,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from claimsense.security import generate_secrets  # noqa: E402
+from scamshield.security import generate_secrets  # noqa: E402
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, default=ROOT / "secrets")
-    ap.add_argument("--provider-id", required=True, help="raw provider id the demo 'provider' login represents")
+    ap.add_argument("--customer-account", required=True, help='raw "bank:account" the demo customer login owns')
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
     if (a.out / "pseudo_key").exists() and not a.force:
         sys.exit(f"{a.out} already has secrets; use --force to replace them (old data becomes unreadable)")
     users = {
-        "investigator": {"role": "investigator"},
+        "analyst": {"role": "analyst"},
         "auditor": {"role": "auditor"},
-        "provider": {"role": "provider", "provider_id": a.provider_id},
+        "customer": {"role": "customer", "account": a.customer_account},
     }
     pw = generate_secrets(a.out, users)
     p = a.out / "demo_passwords.txt"

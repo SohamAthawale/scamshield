@@ -1,112 +1,111 @@
-# ClaimSense
+# ScamShield
 
-**Real-time claim integrity on IBM LinuxONE.** IBM Z Datathon 2026, Theme 1: *Real-Time AI for Critical Decisions*.
+**Real-time scam and mule-account interception on IBM LinuxONE.** IBM Z Datathon 2026, Theme 1: *Real-Time AI for Critical Decisions*.
 
-ClaimSense checks every Medicare-style claim **before it is paid**, in milliseconds:
+ScamShield checks every payment **before the money moves**, in milliseconds:
 
-- **Honest mistakes come back with a plain-language fix** (`RETURN_WITH_FIX`).
-- **A suspicious provider pattern pauses payment** and goes to a human investigator with an evidence brief (`HOLD_FOR_REVIEW`).
-- **Everything else is paid at once** (`PAY`).
+- **Most payments go straight through** (`ALLOW`).
+- **Out-of-character or risky payments get a clear, specific warning.** The customer decides whether to send (`WARN`).
+- **Payments matching a laundering or mule-account pattern are paused** while the bank calls the customer back on a number it already holds; an analyst gets an evidence brief (`HOLD`).
 
-The honest majority gets help, not punishment.
-
-> **The problem.** Australia's 2023 Philip Review estimated Medicare loses $1.5B to $3B a year, mostly through billing errors rather than deliberate fraud, and warned the figure could reach $8B. It pointed to real-time claim checking as a fix. We prove the approach on public US Medicare-style claims data. Sources: [health.gov.au](https://www.health.gov.au/ministers/the-hon-mark-butler-mp/media/medicare-non-compliance-and-fraud-costing-australians), [Philip Review](https://apo.org.au/node/322212).
+> **The problem.** Australians lost **$2.03B to scams in 2024** (494,732 reports; National Anti-Scam Centre / ACCC *Targeting Scams 2024*). The money moves through **mule accounts** within minutes. The **Scams Prevention Framework** (2025) now requires banks to detect, disrupt and respond. Once money has left, it's rarely recovered, so the check has to happen *in-transaction*.
 
 ## Why LinuxONE
 
-- **Claims are high-volume transactions**, the same workload as card authorisation, which Telum was built for.
-- **The AI runs on the same machine as the transactions:**
-  - a PyTorch claim model on the **Telum II on-chip AI accelerator** (`torch_nnpa`);
-  - an XGBoost provider model;
-  - **IBM Granite** writing the explanations through llama.cpp with the zDNN backend.
-- **Every claim is scored in-transaction**, instead of sampling after payment.
-- **Payloads are encrypted with AES-256-GCM** on CPACF, and every decision lands in a tamper-evident audit chain.
+- **Scoring every payment in-transaction is the workload Telum was built for.** Banks already run their payments on IBM Z.
+- **The AI runs next to the payments:**
+  - a PyTorch customer-behaviour model on the **Telum II on-chip AI accelerator** (`torch_nnpa`);
+  - an XGBoost risk model over the payer's and the receiving account's rolling history;
+  - **IBM Granite** (llama.cpp with the zDNN backend) writing customer messages and analyst briefs.
+- **Account numbers are pseudonymised on arrival** and payloads are encrypted with AES-256-GCM (CPACF).
+- **Every decision is hash-chained** in a tamper-evident audit log.
 
-## Results (measured on the IBM z17 VM, machine type 9175)
+## Results (IBM z17 VM, machine type 9175, unseen test days 9–10 Sep)
 
 | | |
 |---|---|
-| Server latency per claim, live demo at 50 claims/s with Granite running | **p50 3.7 ms, p99 13.4 ms** |
-| Peak throughput on 3 vCPUs | **283 claims/s**, server p50 4.2 ms |
-| Claims scored | **100%**, before payment |
-| Provider risk model on held-out providers | ROC-AUC **0.942**, PR-AUC 0.675 (base rate 0.094) |
-| Held claims that come from flagged providers | **61%** (base rate 36%), with 0.5% of claims held |
-| Injected honest billing errors caught | **65/65 rule-type errors**; amount typos 1/13 (see limitations) |
-| Telum II NNPA vs CPU, claim autoencoder | **1.37× faster at 1,024 claims/batch, 1.61× at 4,096**; slower below 64 (dispatch overhead), so small batches stay on the CPU |
+| Payments checked | **100%**, before money moves |
+| Server latency, live at 274 payments/s with Granite running | **p50 4.4 ms**, p99 53 ms (3 vCPUs) |
+| Risk model on 862,792 unseen payments (0.11% laundering) | ROC-AUC **0.984**, PR-AUC 0.564, best F1 0.587 (85% precision, 45% recall) |
+| Payments paused | **0.11%**, of which **53%** are laundering (≈480× the base rate) |
+| Laundering payments warned or paused | **82%** |
+| Laundered money paused before it moved | **$269M of $424M** |
+| Laundering schemes broken (at least one payment paused) | **150 of 174** (fan-in 16/18, fan-out 18/20, cycles 19/22, …) |
+| Injected victim-to-mule payments (live replay) | **55/57 warned or paused** |
+| Telum II NNPA vs CPU (payment model) | **1.2× at 1,024 payments/call, 1.4× at 4,096**; slower below ~256 (dispatch overhead), so small batches stay on the CPU and bursts shift to the accelerator |
+| Start-up | rolling state for **514,022 accounts from 4.2M historical payments in 61 s** |
 
 Details: [docs/MODEL_CARD.md](docs/MODEL_CARD.md), [docs/ENV_REPORT.md](docs/ENV_REPORT.md), [docs/evidence/](docs/evidence/).
 
 ## Architecture
 
 ```
-simulator ──POST /claims──▶ api (FastAPI, uvicorn) ────────────────────────────────────────────────┐
-                              ├ pseudonymise IDs (HMAC-SHA256)                                      │
-                              ├ micro-batch claims arriving within 3 ms                             │
-                              ├ claim features + rolling provider state (one claim at a time)        │
-                              ├ claim autoencoder: PyTorch → Telum II NNPA (≥256/batch) or CPU      │
-                              ├ provider risk: XGBoost (+ SHAP reasons, peer percentiles)            │
-                              ├ hard rules: after death, swapped dates, duplicate, no coverage, …    │
-                              ├ fusion → PAY | RETURN_WITH_FIX | HOLD_FOR_REVIEW                     │
-                              ├ AES-256-GCM sealed payload + hash-chained audit ──▶ SQLite (WAL)    │
-                              ├ template note now; Granite note queued ──▶ granite worker (llama.cpp + zDNN)
-                              └ SSE /stream ──▶ dashboard /ui (investigator · billing office · auditor)
+core banking ──POST /payments──▶ api (FastAPI) ─────────────────────────────────────────────────────┐
+                                  ├ pseudonymise account numbers (HMAC-SHA256)                         │
+                                  ├ micro-batch payments arriving within 3 ms (bursts → bigger batches) │
+                                  ├ ONE streaming feature engine: payment + payer history +            │
+                                  │   receiving-account (mule) history, O(1) per payment               │
+                                  ├ customer-behaviour autoencoder: PyTorch → Telum II NNPA (≥1,024/call) or CPU
+                                  ├ risk: XGBoost (+ SHAP drivers)          ├ rule: big first payment to a new payee
+                                  ├ fusion → ALLOW | WARN | HOLD                                         │
+                                  ├ AES-256-GCM sealed payload + hash-chained audit ──▶ SQLite (WAL)     │
+                                  ├ instant customer message; Granite rewrite queued ──▶ granite worker (llama.cpp + zDNN)
+                                  └ SSE /stream ──▶ dashboard /ui (analyst · customer · auditor)
 ```
 
-Everything runs as containers built **from the official L1CC Jupyter image** (`deploy/app.Dockerfile`, `docker-compose.yml`): non-root, read-only filesystem, only the API published, and only on localhost.
+Everything runs as containers built **from the official L1CC Jupyter image**: non-root, read-only filesystem, only the API published, and only on localhost.
 
 ## Run it
 
 On the LinuxONE VM (`Ubuntu24.04-Datathon`, flavour `AI_LAB`, Docker installed):
 
 ```bash
-git clone <this repo> ~/claimsense && cd ~/claimsense
-# data: the Kaggle CSVs in ~/shared/data/raw (scripts/push_data.sh copies them from a laptop)
+git clone <this repo> ~/scamshield && cd ~/scamshield
+# data: HI-Small_Trans.csv + HI-Small_Patterns.txt into ~/shared/scamshield/aml (SHA-256 in docs/ENV_REPORT.md)
 docker pull registry.linuxone.cloud.marist.edu/l1cc/jupyterlab-image-s390x:latest
 docker compose build api
-printf 'ACCEL_MODE=nnpa\nJUPYTER_TOKEN=%s\n' "$(openssl rand -hex 16)" > .env
-docker run --rm --user 1000:1000 -v $PWD:/repo -v ~/shared:/home/ibm-user/shared -w /home/ibm-user/shared \
-  --entrypoint python claimsense-app:latest -m claimsense.training --raw data/raw --models models --data data
-docker run --rm --user 1000:1000 -v $PWD:/repo -w /repo --entrypoint python claimsense-app:latest \
-  scripts/make_secrets.py --provider-id PRV54092
+printf 'ACCEL_MODE=nnpa\nJUPYTER_TOKEN=%s\nSHARED=%s\n' "$(openssl rand -hex 16)" ~/shared/scamshield > .env
+docker run --rm --user 1000:1000 -v ~/shared/scamshield:/home/ibm-user/shared -w /home/ibm-user/shared \
+  --entrypoint python scamshield-app:latest -m scamshield.training --raw aml --models models --data data
+docker run --rm --user 1000:1000 -v $PWD:/repo -w /repo --entrypoint python scamshield-app:latest \
+  scripts/make_secrets.py --customer-account 0119:8000E0380
 # Granite (big-endian GGUF) into ~/shared/models/llm/ (see docs/ENV_REPORT.md)
 docker compose up -d                                   # api + Granite worker
-docker compose --profile demo run --rm simulator       # replay held-out claims
+docker compose --profile demo run --rm simulator       # replay the held-out days
 ```
 
 From your laptop: `scripts/tunnel.sh`, then open <http://localhost:8000/ui>. The demo logins are in `secrets/demo_passwords.txt`.
 
-Tests (444+): `PYTHONPATH=src python -m pytest -q tests` (add `-m slow` for the real-data parity test).
+Tests: `PYTHONPATH=src python -m pytest -q tests`.
 
 ## Repo map
 
 | Path | What |
 |---|---|
-| `src/claimsense/features.py` | Claim and provider features, streaming plus batch, parity-tested |
-| `src/claimsense/training.py` | Split, both models, thresholds tuned on a replayed validation stream |
-| `src/claimsense/scoring.py`, `fusion.py`, `explain.py` | Scoring engine, decision policy, reasons and Granite prompts |
-| `src/claimsense/inference/` | NNPA/CPU/NumPy anomaly scorers, XGBoost scorer |
-| `src/claimsense/security.py`, `audit.py`, `store.py` | Pseudonymisation, AES-GCM, passwords, audit chain, storage |
-| `src/claimsense/api/`, `ui/` | FastAPI service and dashboard |
-| `src/claimsense/granite_worker.py`, `simulator.py` | Granite explanation worker, claim stream with injected errors |
-| `notebooks/` | EDA, training (including the NNPA demo) and fairness, executed on LinuxONE |
-| `scripts/` | VM helpers, probe, benchmarks, secrets |
+| `src/scamshield/features.py` | The streaming feature engine (payment, payer history, receiver/mule history) and the scam rule |
+| `src/scamshield/training.py` | Time split, both models, thresholds tuned on validation days, scheme-level metrics |
+| `src/scamshield/scoring.py`, `fusion.py`, `explain.py` | Scoring engine and mule watchlist, decision policy, reasons and Granite prompts |
+| `src/scamshield/inference/` | NNPA/CPU/NumPy anomaly scorers, XGBoost risk scorer |
+| `src/scamshield/security.py`, `audit.py`, `store.py` | Pseudonymisation, AES-GCM, passwords, audit chain, storage |
+| `src/scamshield/api/`, `ui/` | FastAPI service and dashboard |
+| `src/scamshield/granite_worker.py`, `simulator.py` | Granite worker, payment stream with injected victim and honest payments |
+| `notebooks/` | Data, training (including the NNPA demo) and fairness, executed on LinuxONE |
 | `docs/` | Model card, security, environment report, demo script, evidence |
 
 ## Responsible AI
 
-- **A human always decides.** Nothing is denied automatically.
-- **Every decision carries its reasons:**
-  - rule broken and how to fix it;
-  - unusual claim features and their direction;
-  - provider drivers as SHAP values with peer percentiles.
-- **Granite only sees pseudonymised, structured facts.** Investigator briefs always say "model estimate, not a finding of fraud".
-- **A fairness check is published.** Gender is even, while under-65 patients and race code 2 are flagged more often. Mitigations and next steps are in the [model card](docs/MODEL_CARD.md).
+- **A warning never blocks.** The customer decides.
+- **A hold always goes to a human,** who calls the customer back on a number the bank already has.
+- **Every decision carries its reasons:** the rule fired, what's unusual for this customer, and the risk drivers (SHAP).
+- **Granite only sees pseudonymised, structured facts.** Its output is rejected if it contains anything shaped like an account number, and analyst briefs always say "model estimate, not a finding of fraud".
+- **A fairness audit is published** (by currency, payment format and bank size). Honest ACH payments and small-bank customers carry more friction; mitigations are in the [model card](docs/MODEL_CARD.md).
 
-## Limitations
+## Limitations (honest)
 
-- **Synthetic data with provider-level labels.**
-- **Amount typos are mostly missed.** This dataset has no fixed fee per item; MBS does, which would make an extra zero a deterministic check.
-- **Granite is slow on 3 vCPUs** (about 1–2 minutes per note). It runs off the hot path; a template note is shown immediately.
+- **The data is synthetic (IBM AMLSim)** and labels mark laundering networks, not individual scam victims.
+- **The models can't tell a victim's payment to a mule from an honest large first payment to a new payee,** because the mule accounts here look like ordinary receivers. Both get the same protective friction: about 1 in 3 paused, the rest warned ([evidence](docs/evidence/replay/victim_vs_honest_offline.md)).
+- **About 87% of laundering is ACH, and laundering by cash, cheque or card is mostly missed.**
+- **Granite is slow on 3 vCPUs** (about 1–2 minutes per note). It runs off the hot path, and an instant template message is shown first.
 
 ## Team
 
@@ -117,4 +116,4 @@ Tests (444+): `PYTHONPATH=src python -m pytest -q tests` (add `-m slow` for the 
 | Backend and security (API, crypto, RBAC, audit) | _fill in_ |
 | UI and pitch (dashboard, video, slides) | _fill in_ |
 
-All solution code in this repository was written during the IBM Z Datathon 2026 (Oct 17–18). It uses public data and open-source libraries only, and none of the reference lab notebooks' code. _(If AI coding assistants were used, say so here, per the organisers' rules.)_
+All solution code was written during the IBM Z Datathon 2026 (Oct 17–18). It uses public data and open-source libraries only, and none of the reference lab notebooks' code. _(If AI coding assistants were used, say so here, per the organisers' rules.)_

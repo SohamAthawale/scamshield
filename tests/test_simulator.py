@@ -1,166 +1,97 @@
-"""simulator.py: injected billing errors, stream loading, and one replay against the in-process API."""
+"""simulator.py: stream loading, mule accounts from the pattern file, injected payments, and one replay."""
 import asyncio
-import datetime as dt
 import json
 import random
+import statistics
 
 import pytest
 
-from claimsense import simulator
-from claimsense.simulator import INJECTIONS, deceased_benes, inject, load_stream, uncovered_benes
+from scamshield import simulator
+from scamshield.simulator import FIELDS, INJECTIONS, inject, load_stream, mule_accounts
 
-from conftest import DECEASED, NO_COVER, claim_json, write_bene_csv
+from conftest import LIVE_MULE, SPLITS
 
-D = dt.date.fromisoformat
-DEAD = {"BENE11002": "2009-06-01", "BENE11007": "2009-02-15"}
-UNCOVERED = {"A": ["BENE20001", "BENE20002"], "B": ["BENE30001"]}
-
-
-@pytest.fixture
-def claim():
-    return claim_json("CLM1", start="2009-03-01", end="2009-03-04", amount=250.0, AdmissionDt="2009-03-01",
-                      DischargeDt="2009-03-04", inpatient=1)
+BASE = {"payment_id": "T5", "ts": "2022-09-07 10:00", "from_bank": "0119", "from_acct": "8C0FFEE01", "to_bank": "001",
+        "to_acct": "8ABCDEF01", "amount_paid": 120.0, "currency_paid": "Euro", "amount_received": 132.0,
+        "currency_received": "US Dollar", "payment_format": "Cheque"}
+HISTORY = {"0119:8C0FFEE01": [100.0, 120.0, 90.0, 110.0]}
+MULES = [("021174", "80BADBAD4"), ("010", "8DEADBEEF")]
 
 
-def test_inject_returns_a_copy_with_new_claim_id(claim):
-    before = dict(claim)
-    assert set(INJECTIONS) == {"amount_typo", "after_death", "dates_swapped", "duplicate", "no_attending",
-                               "no_coverage"}
-    for n, kind in enumerate(INJECTIONS):
-        out = inject(claim, kind, DEAD, random.Random(0), n, UNCOVERED)
-        assert out is not None and out is not claim
-        assert out["ClaimID"] == f"CLM1-INJ{n}"
-    assert claim == before
+def test_load_stream(api_env):
+    rows = load_stream(api_env.stream_file, None)
+    n = int((api_env.aml.split == "test").sum())
+    assert len(rows) == n and [r["payment_id"] for r in rows[:3]] == ["T0", "T1", "T2"]
+    assert set(rows[0]) == set(FIELDS) | {"payment_id"}
+    assert isinstance(rows[0]["amount_paid"], float) and isinstance(rows[0]["amount_received"], float)
+    assert all(isinstance(rows[0][k], str) for k in ("from_bank", "from_acct", "ts", "payment_format"))
+    assert all(len(r["from_bank"]) >= 3 for r in rows)                      # leading zeros kept
+    assert rows[0]["ts"] >= SPLITS[1]
+    # ids are positions in the FILE, so offset/limit keep them stable
+    part = load_stream(api_env.stream_file, 5, offset=10)
+    assert [r["payment_id"] for r in part] == [f"T{i}" for i in range(10, 15)]
+    assert part == rows[10:15]
 
 
-def test_inject_amount_typo(claim):
-    out = inject(claim, "amount_typo", DEAD, random.Random(0), 0)
-    assert out["InscClaimAmtReimbursed"] == 2500.0
-    assert inject({**claim, "InscClaimAmtReimbursed": 0.0}, "amount_typo", DEAD, random.Random(0), 0) is None
+def test_loaded_stream_validates_as_api_payments(api_env):
+    from scamshield.api.schemas import PaymentIn
+
+    for r in load_stream(api_env.stream_file, None):
+        p = PaymentIn(**r)
+        assert p.sender == f"{r['from_bank']}:{r['from_acct']}"
 
 
-@pytest.mark.parametrize("seed", range(5))
-def test_inject_after_death(claim, seed):
-    out = inject(claim, "after_death", DEAD, random.Random(seed), 0)
-    assert out["BeneID"] in DEAD
-    dod = D(DEAD[out["BeneID"]])
-    assert D(out["ClaimStartDt"]) > dod
-    assert D(out["ClaimEndDt"]) - D(out["ClaimStartDt"]) == D(claim["ClaimEndDt"]) - D(claim["ClaimStartDt"])
-    assert out["AdmissionDt"] is None and out["DischargeDt"] is None and out["is_inpatient"] == 0
+def test_mule_accounts(aml):
+    mules = mule_accounts(aml.raw_dir, start=SPLITS[1])
+    assert LIVE_MULE in mules
+    live_attempt = next(att for kind, att in aml.attempts if att[0].ts >= __import__("pandas").Timestamp(SPLITS[1]))
+    assert set(mules) == {(r.to_bank, r.to_acct) for r in live_attempt}
+    everything = mule_accounts(aml.raw_dir, start="2000-01-01")
+    assert len(everything) > len(mules) and mules == sorted(mules)
+    assert mule_accounts(aml.raw_dir / "nowhere") == []
 
 
-def test_inject_after_death_without_end_date(claim):
-    out = inject({**claim, "ClaimEndDt": None}, "after_death", DEAD, random.Random(1), 0)
-    assert out["ClaimEndDt"] == out["ClaimStartDt"]
+@pytest.mark.parametrize("kind", INJECTIONS)
+def test_inject_scales_the_senders_usual_amount(kind):
+    rng = random.Random(1)
+    c = inject(BASE, kind, HISTORY, MULES, rng, 7)
+    usual = statistics.median(HISTORY["0119:8C0FFEE01"])
+    assert c["payment_id"] == f"INJ7-{kind}"
+    assert 8 * usual <= c["amount_paid"] <= 30 * usual and c["amount_received"] == c["amount_paid"]
+    assert c["currency_received"] == c["currency_paid"] == "Euro"
+    assert c["payment_format"] in ("ACH", "Wire")
+    assert (c["from_bank"], c["from_acct"], c["ts"]) == (BASE["from_bank"], BASE["from_acct"], BASE["ts"])
+    assert BASE["amount_paid"] == 120.0 and BASE["payment_id"] == "T5"     # base untouched
 
 
-def test_inject_after_death_impossible_without_deceased(claim):
-    assert inject(claim, "after_death", {}, random.Random(0), 0) is None
+def test_inject_victim_to_mule_pays_a_known_mule():
+    for seed in range(10):
+        c = inject(BASE, "victim_to_mule", HISTORY, MULES, random.Random(seed), 0)
+        assert (c["to_bank"], c["to_acct"]) in MULES
 
 
-@pytest.mark.parametrize("end", ["2009-03-04", "2009-03-01", None])
-def test_inject_dates_swapped(claim, end):
-    out = inject({**claim, "ClaimEndDt": end}, "dates_swapped", DEAD, random.Random(0), 0)
-    assert D(out["ClaimEndDt"]) < D(out["ClaimStartDt"])
+def test_inject_honest_new_payee_pays_a_brand_new_account():
+    c = inject(BASE, "honest_new_payee", HISTORY, MULES, random.Random(0), 42)
+    assert c["to_acct"] == "NEW0000042" and c["to_bank"] == BASE["to_bank"]
 
 
-def test_inject_duplicate_keeps_content(claim):
-    out = inject(claim, "duplicate", DEAD, random.Random(0), 3)
-    assert {k: v for k, v in out.items() if k != "ClaimID"} == {k: v for k, v in claim.items() if k != "ClaimID"}
-    assert out["ClaimID"] != claim["ClaimID"]
+@pytest.mark.parametrize("history,mules,kind", [
+    ({}, MULES, "honest_new_payee"),                                         # no history
+    ({"0119:8C0FFEE01": [100.0, 100.0]}, MULES, "honest_new_payee"),        # < 3 prior amounts
+    ({"0119:8C0FFEE01": [0.0, 0.0, 0.0, 5.0]}, MULES, "honest_new_payee"),  # usual <= 0
+    (HISTORY, [], "victim_to_mule"),                                         # no mules
+])
+def test_inject_returns_none_when_impossible(history, mules, kind):
+    assert inject(BASE, kind, history, mules, random.Random(0), 0) is None
 
 
-def test_inject_no_attending(claim):
-    out = inject(claim, "no_attending", DEAD, random.Random(0), 0)
-    assert out["AttendingPhysician"] is None
-    assert {k: v for k, v in out.items() if k not in ("ClaimID", "AttendingPhysician")} == \
-        {k: v for k, v in claim.items() if k not in ("ClaimID", "AttendingPhysician")}
-
-
-@pytest.mark.parametrize("inpatient,pool", [(1, "A"), (0, "B")])
-def test_inject_no_coverage_picks_a_bene_without_the_right_part(claim, inpatient, pool):
-    c = {**claim, "is_inpatient": inpatient}
-    for seed in range(5):
-        out = inject(c, "no_coverage", DEAD, random.Random(seed), 0, UNCOVERED)
-        assert out["BeneID"] in UNCOVERED[pool]
-        assert {k: v for k, v in out.items() if k not in ("ClaimID", "BeneID")} == \
-            {k: v for k, v in c.items() if k not in ("ClaimID", "BeneID")}
-
-
-@pytest.mark.parametrize("uncovered", [None, {}, {"A": [], "B": ["BENE30001"]}])
-def test_inject_no_coverage_impossible(claim, uncovered):
-    assert inject({**claim, "is_inpatient": 1}, "no_coverage", DEAD, random.Random(0), 0, uncovered) is None
-
-
-def test_injected_errors_trip_the_matching_rules(claim):
-    from claimsense.features import duplicate_key, hard_errors
-
-    bene = {"DOD": None, "NoOfMonths_PartACov": 12, "NoOfMonths_PartBCov": 12}
-    assert hard_errors(claim, bene) == []
-    rng = random.Random(0)
-    dead = inject(claim, "after_death", DEAD, rng, 0)
-    assert "after_death" in hard_errors(dead, {**bene, "DOD": DEAD[dead["BeneID"]]})
-    assert "end_before_start" in hard_errors(inject(claim, "dates_swapped", DEAD, rng, 1), bene)
-    assert "missing_attending" in hard_errors(inject(claim, "no_attending", DEAD, rng, 2), bene)
-    nc = inject(claim, "no_coverage", DEAD, rng, 4, UNCOVERED)
-    assert "no_coverage" in hard_errors(nc, {**bene, "NoOfMonths_PartACov": 0})
-    dup = inject(claim, "duplicate", DEAD, rng, 3)
-    assert duplicate_key(dup, "B", "P") == duplicate_key(claim, "B", "P")
-
-
-# ------------------------------------------------------------------------------ files
-STREAM_HEADER = ["ClaimID", "BeneID", "Provider", "ClaimStartDt", "ClaimEndDt", "AdmissionDt", "DischargeDt",
-                 "InscClaimAmtReimbursed", "DeductibleAmtPaid", "AttendingPhysician", "OperatingPhysician",
-                 "ClmDiagnosisCode_1", "ClmProcedureCode_1", "is_inpatient"]
-
-
-def write_stream(path, rows):
-    path.write_text("\n".join([",".join(STREAM_HEADER)] + [",".join(r) for r in rows]) + "\n")
-
-
-def test_load_stream_types_and_missing(tmp_path):
-    p = tmp_path / "stream.csv"
-    write_stream(p, [
-        ["CLM1", "BENE11001", "PRV51001", "2009-01-01", "2009-01-02", "", "", "500", "", "PHY1", "NA", "0389",
-         "7092", "0"],
-        ["CLM2", "BENE11002", "PRV51001", "2009-01-03", "", "2009-01-03", "2009-01-05", "", "1068", "", "",
-         "V5866", "", "1"],
-        ["CLM3", "BENE11003", "PRV51002", "2009-01-04", "2009-01-04", "", "", "10.5", "0", "PHY2", "", "4019",
-         "", "0"],
-    ])
-    rows = load_stream(p, limit=None)
-    assert len(rows) == 3
-    a, b, _ = rows
-    assert a["InscClaimAmtReimbursed"] == 500.0 and a["DeductibleAmtPaid"] == 0.0 and a["is_inpatient"] == 0
-    assert a["AdmissionDt"] is None and a["OperatingPhysician"] is None
-    assert a["ClmDiagnosisCode_1"] == "0389" and a["ClmProcedureCode_1"] == "7092"   # read as text
-    assert b["InscClaimAmtReimbursed"] == 0.0 and b["DeductibleAmtPaid"] == 1068.0 and b["is_inpatient"] == 1
-    assert b["ClaimEndDt"] is None and b["AttendingPhysician"] is None
-    assert isinstance(a["InscClaimAmtReimbursed"], float) and isinstance(b["is_inpatient"], int)
-    assert [r["ClaimID"] for r in load_stream(p, limit=2)] == ["CLM1", "CLM2"]
-    assert [r["ClaimID"] for r in load_stream(p, limit=1, offset=1)] == ["CLM2"]
-
-
-def test_loaded_stream_rows_validate_as_api_claims(tmp_path):
-    from claimsense.api.schemas import ClaimIn
-
-    p = tmp_path / "stream.csv"
-    write_stream(p, [["CLM1", "BENE11001", "PRV51001", "2009-01-01", "", "", "", "5", "", "", "", "0389", "", "0"]])
-    c = ClaimIn(**load_stream(p, None)[0])
-    assert c.ClaimEndDt is None and c.ClmDiagnosisCode_1 == "0389" and c.AttendingPhysician is None
-
-
-def test_deceased_and_uncovered_benes(tmp_path):
-    assert deceased_benes(tmp_path) == {} and uncovered_benes(tmp_path) == {}
-    write_bene_csv(tmp_path / "Train_Beneficiarydata-123.csv")
-    assert deceased_benes(tmp_path) == DECEASED
-    assert uncovered_benes(tmp_path) == {"A": [b for b, p in NO_COVER.items() if p == "A"],
-                                         "B": [b for b, p in NO_COVER.items() if p == "B"]}
+def test_honest_new_payee_works_without_mules():
+    assert inject(BASE, "honest_new_payee", HISTORY, [], random.Random(0), 0) is not None
 
 
 # ------------------------------------------------------------------------------ replay against the app
 class _ClientOverTestClient:
-    """Stands in for httpx.AsyncClient; forwards to a running TestClient (so the app's lifespan loop is used)."""
+    """Stands in for httpx.AsyncClient and forwards to a running TestClient (whose loop runs the app)."""
 
     def __init__(self, tc, base_url, headers, timeout, limits):
         self.tc, self.headers = tc, headers
@@ -175,39 +106,43 @@ class _ClientOverTestClient:
         return await asyncio.to_thread(self.tc.post, path, json=json, headers=self.headers)
 
 
-def test_run_replays_and_reports_injections(api_env, tmp_path, monkeypatch):
-    claims = [claim_json(f"CLM{i}", provider=f"PRV5100{i % 3}", bene=f"BENE{11003 + i % 7}",
-                         start=f"2009-0{1 + i % 5}-1{i % 9}", end=None, amount=100.0 + 10 * i) for i in range(10)]
+def _run(api_env, tmp_path, monkeypatch, payments, inject_rate, raw_dir):
     out = tmp_path / "sim"
-    with api_env.client(batch_window_ms=5.0) as tc:
-        monkeypatch.setattr(simulator.httpx, "AsyncClient",
-                            lambda **kw: _ClientOverTestClient(tc, **kw))
-        summary = asyncio.run(simulator.run("http://test", api_env.service_token, claims, rate=0, concurrency=8,
-                                            inject_rate=1.0, raw_dir=api_env.raw, seed=1, burst_every=0,
-                                            burst_size=0, out_dir=out))
-    assert summary["sent"] == 20
-    assert sum(summary["outcomes"].values()) == 20
-    assert not any(k.startswith(("http_", "error:")) for k in summary["outcomes"]), summary["outcomes"]
-    inj = summary["injected_errors"]
-    assert sum(v["injected"] for v in inj.values()) == 10
-    # round robin over the 6 kinds: 10 injections -> 2,2,2,2,1,1
-    assert [inj[k]["injected"] for k in INJECTIONS] == [2, 2, 2, 2, 1, 1]
-    for kind in ("after_death", "dates_swapped", "duplicate", "no_attending", "no_coverage"):  # rules: always caught
-        assert inj[kind]["caught"] == inj[kind]["injected"], (kind, inj)
-    files = sorted(p.name for p in out.iterdir())
-    assert any(f.startswith("replay-") for f in files) and any(f.startswith("injected-") for f in files)
-    saved = json.loads(next(out.glob("replay-*.json")).read_text())
-    assert saved["sent"] == 20
-
-
-def test_run_keeps_injecting_other_kinds_when_one_kind_is_impossible(api_env, tmp_path, monkeypatch):
-    write_bene_csv(api_env.raw / "Train_Beneficiarydata-1.csv", no_cover={})   # nobody lacks coverage
-    claims = [claim_json(f"CLM{i}", provider=f"PRV5100{i % 3}", bene=f"BENE{11003 + i % 7}",
-                         start=f"2009-0{1 + i % 5}-1{i % 9}", end=None, amount=100.0 + 10 * i) for i in range(12)]
     with api_env.client() as tc:
         monkeypatch.setattr(simulator.httpx, "AsyncClient", lambda **kw: _ClientOverTestClient(tc, **kw))
-        summary = asyncio.run(simulator.run("http://test", api_env.service_token, claims, rate=0, concurrency=4,
-                                            inject_rate=1.0, raw_dir=api_env.raw, seed=1, burst_every=0,
-                                            burst_size=0, out_dir=tmp_path / "sim"))
-    # every claim is followed by an injection of SOME possible kind
-    assert summary["sent"] == 24
+        summary = asyncio.run(simulator.run("http://test", api_env.service_token, payments, rate=0, concurrency=1,
+                                            inject_rate=inject_rate, raw_dir=raw_dir, seed=3, out_dir=out))
+    return summary, out
+
+
+def test_run_replays_and_reports_injections(api_env, tmp_path, monkeypatch, aml):
+    import pandas as pd
+
+    # mules must be live accounts in the pattern file; use the whole file so this tiny stream has some
+    monkeypatch.setattr(simulator, "mule_accounts", lambda raw, start="2022-09-09": mule_accounts(raw, "2000-01-01"))
+    payments = load_stream(api_env.stream_file, None)
+    summary, out = _run(api_env, tmp_path, monkeypatch, payments, 0.5, aml.raw_dir)
+    inj = summary["injected"]
+    n_inj = sum(v["injected"] for v in inj.values())
+    assert summary["sent"] == len(payments) + n_inj and n_inj > 0
+    assert sum(summary["outcomes"].values()) == summary["sent"]
+    assert not any(k.startswith(("http_", "error:")) for k in summary["outcomes"]), summary["outcomes"]
+    for k in INJECTIONS:
+        assert inj[k]["warned"] + inj[k]["held"] + inj[k]["allowed"] == inj[k]["injected"]
+    assert abs(inj["victim_to_mule"]["injected"] - inj["honest_new_payee"]["injected"]) <= 1   # round robin
+    saved = json.loads(next(out.glob("replay-*.json")).read_text())
+    assert saved["sent"] == summary["sent"]
+    csv = pd.read_csv(next(out.glob("injected-*.csv")))
+    assert len(csv) == n_inj and set(csv["kind"]) <= set(INJECTIONS)
+
+
+def test_run_without_injection(api_env, tmp_path, monkeypatch, aml):
+    payments = load_stream(api_env.stream_file, 20)
+    summary, _ = _run(api_env, tmp_path, monkeypatch, payments, 0.0, aml.raw_dir)
+    assert summary["sent"] == 20 and all(v["injected"] == 0 for v in summary["injected"].values())
+
+
+def test_run_still_injects_honest_payees_when_there_are_no_mules(api_env, tmp_path, monkeypatch):
+    payments = load_stream(api_env.stream_file, None)
+    summary, _ = _run(api_env, tmp_path, monkeypatch, payments, 0.5, tmp_path / "no-raw-dir")
+    assert summary["injected"]["honest_new_payee"]["injected"] > 0

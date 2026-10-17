@@ -5,7 +5,7 @@ explain.build_messages), runs IBM Granite through llama.cpp (built with the zDNN
 II NNPA), and writes the text back. On any failure the template note stays, so every decision always has
 a truthful explanation.
 
-    python -m claimsense.granite_worker
+    python -m scamshield.granite_worker
 """
 from __future__ import annotations
 
@@ -20,10 +20,12 @@ from .explain import build_messages
 from .security import load_keyring
 from .store import Store
 
-log = logging.getLogger("claimsense.granite")
+log = logging.getLogger("scamshield.granite")
 
-# lines the model must never produce: raw IDs in the dataset's formats
-RAW_ID = re.compile(r"\b(BENE|PRV|PHY|CLM)\d{3,}\b")
+# the model must never produce raw account numbers (dataset format: 9 hex characters, e.g. 8000EBD30, 100428660)
+RAW_ID = re.compile(r"\b([0-9A-F]{9}|NEW\d{7})\b")
+# "not a finding", "not a definitive finding", "not a formal finding", ... of fraud
+DISCLAIMER = re.compile(r"not\s+(a|an)\s+(\w+\s+)?finding", re.IGNORECASE)
 
 
 def trim_to_sentence(text: str) -> str:
@@ -52,7 +54,7 @@ class GraniteWriter:
             raise ValueError("empty completion")
         if RAW_ID.search(text):
             raise ValueError("completion contains something that looks like a raw identifier")
-        if kind == "brief" and "not a finding" not in text.lower():
+        if kind == "brief" and not DISCLAIMER.search(text):
             text += "\n\nThis is a model estimate, not a finding of fraud."
         return text
 
@@ -60,11 +62,11 @@ class GraniteWriter:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     e = os.environ.get
-    secrets = Path(e("CLAIMSENSE_SECRETS", "/run/secrets"))
-    data = Path(e("CLAIMSENSE_DATA_DIR", "/data"))
-    store = Store(e("CLAIMSENSE_DB", str(data / "claimsense.db")), load_keyring(secrets),
-                  e("CLAIMSENSE_AUDIT_CHECKPOINTS", str(data / "audit_checkpoints.log")))
-    model = e("GRANITE_MODEL", "/llm/granite-3.3-2b-instruct-be.Q4_K_M.gguf")
+    secrets = Path(e("SCAMSHIELD_SECRETS", "/run/secrets"))
+    data = Path(e("SCAMSHIELD_DATA_DIR", "/data"))
+    store = Store(e("SCAMSHIELD_DB", str(data / "scamshield.db")), load_keyring(secrets),
+                  e("SCAMSHIELD_AUDIT_CHECKPOINTS", str(data / "audit_checkpoints.log")))
+    model = e("GRANITE_MODEL", "/llm/granite-3.3-2b-instruct-be.Q8_0.gguf")
     writer = GraniteWriter(model, threads=int(e("GRANITE_THREADS", "3")), max_tokens=int(e("GRANITE_MAX_TOKENS", "120")))
     idle_sleep = float(e("GRANITE_IDLE_SLEEP", "0.5"))
     running = True

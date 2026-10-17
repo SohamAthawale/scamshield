@@ -26,4 +26,4 @@ ENV PYTHONPATH=/app/src \
 WORKDIR /app
 USER 1000
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "--factory", "claimsense.api.main:app_factory", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]
+CMD ["python", "-m", "uvicorn", "--factory", "scamshield.api.main:app_factory", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]

@@ -35,7 +35,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px; display: grid; gap: 16p
 button { background: var(--brand); color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font: inherit; cursor: pointer; }
 button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
 button.small { padding: 4px 10px; font-size: 12px; }
-button.release { background: var(--pay); } button.confirm { background: var(--hold); } button.more { background: var(--ret); color: #111; }
+button.release { background: var(--pay); } button.stop { background: var(--hold); } button.more { background: var(--ret); color: #111; }
 .login { max-width: 380px; margin: 60px auto; }
 .login label { display: block; margin: 10px 0; }
 .login input { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
@@ -48,9 +48,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .feed { display: block; max-height: 360px; overflow: auto; }
 .mono, .tok { font-family: var(--mono); font-size: 12px; }
 .chip { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
-.chip.PAY { background: var(--pay-bg); color: var(--pay); }
-.chip.RETURN_WITH_FIX { background: var(--ret-bg); color: var(--ret); }
-.chip.HOLD_FOR_REVIEW { background: var(--hold-bg); color: var(--hold); }
+.chip.ALLOW { background: var(--pay-bg); color: var(--pay); }
+.chip.WARN { background: var(--ret-bg); color: var(--ret); }
+.chip.HOLD { background: var(--hold-bg); color: var(--hold); }
 tr.flash { animation: flash 1.2s ease-out; }
 @keyframes flash { from { background: var(--ret-bg); } to { background: transparent; } }
 .chartbox { height: 160px; margin-bottom: 10px; }

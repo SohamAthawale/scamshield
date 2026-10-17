@@ -2,7 +2,7 @@
 import glob, json, os, resource, sys, time
 sys.path.insert(0, "/app/src")
 from llama_cpp import Llama
-from claimsense.explain import build_messages
+from scamshield.explain import build_messages
 
 FACTS = {"rules": [{"title": "No attending physician on the claim", "fix": "Add the attending physician's identifier."}],
          "claim": [{"label": "reimbursed amount", "value": "$42,000", "direction": "higher than usual"},

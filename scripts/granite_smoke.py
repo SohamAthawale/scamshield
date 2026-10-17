@@ -2,7 +2,7 @@
 import os, resource, sys, time
 sys.path.insert(0, "/app/src")
 from llama_cpp import Llama
-from claimsense.explain import build_messages
+from scamshield.explain import build_messages
 
 path = os.environ.get("GRANITE_MODEL", "/home/ibm-user/shared/models/llm/granite-3.3-2b-instruct-be.Q4_K_M.gguf")
 t = time.time()

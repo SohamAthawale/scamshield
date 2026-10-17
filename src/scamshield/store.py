@@ -1,7 +1,7 @@
-"""SQLite (WAL) storage: decisions, encrypted claim payloads, explanation notes, investigator cases.
+"""SQLite (WAL) storage: decisions, encrypted payment payloads, explanation notes, analyst cases.
 
-Only pseudonymised tokens and model outputs are stored in the clear. The raw claim (with real
-identifiers) exists only as AES-256-GCM ciphertext, bound to its claim token as associated data.
+Only pseudonymised tokens and model outputs are stored in the clear. The raw payment (account numbers,
+bank codes) exists only as AES-256-GCM ciphertext, bound to its payment token as associated data.
 """
 from __future__ import annotations
 
@@ -17,18 +17,17 @@ from .audit import AuditLog
 from .security import Envelope, Sealed
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS claims (
-    claim_token TEXT PRIMARY KEY,
-    provider_token TEXT NOT NULL,
-    bene_token TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS payments (
+    payment_token TEXT PRIMARY KEY,
+    sender_token TEXT NOT NULL,
+    receiver_token TEXT NOT NULL,
     received_at TEXT NOT NULL,
-    service_date TEXT,
-    amount REAL NOT NULL,
-    is_inpatient INTEGER NOT NULL,
+    paid_at TEXT,
+    amount_usd REAL NOT NULL,
+    payment_format TEXT NOT NULL,
     action TEXT NOT NULL,
     anomaly REAL NOT NULL,
-    provider_risk REAL,
-    provider_claims INTEGER NOT NULL,
+    risk REAL NOT NULL,
     rules TEXT NOT NULL,
     reasons TEXT NOT NULL,
     model_ms REAL,
@@ -37,13 +36,13 @@ CREATE TABLE IF NOT EXISTS claims (
     nonce BLOB NOT NULL,
     ciphertext BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS claims_action ON claims(action);
-CREATE INDEX IF NOT EXISTS claims_provider ON claims(provider_token);
+CREATE INDEX IF NOT EXISTS payments_action ON payments(action);
+CREATE INDEX IF NOT EXISTS payments_sender ON payments(sender_token);
 
 CREATE TABLE IF NOT EXISTS notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    claim_token TEXT NOT NULL REFERENCES claims(claim_token),
-    kind TEXT NOT NULL CHECK (kind IN ('correction', 'brief')),
+    payment_token TEXT NOT NULL REFERENCES payments(payment_token),
+    kind TEXT NOT NULL CHECK (kind IN ('warning', 'brief')),
     status TEXT NOT NULL CHECK (status IN ('pending', 'working', 'done', 'failed')),
     source TEXT NOT NULL,
     text TEXT NOT NULL,
@@ -57,8 +56,8 @@ CREATE INDEX IF NOT EXISTS notes_status ON notes(status, id);
 CREATE INDEX IF NOT EXISTS notes_updated ON notes(updated_at);
 
 CREATE TABLE IF NOT EXISTS cases (
-    claim_token TEXT PRIMARY KEY REFERENCES claims(claim_token),
-    status TEXT NOT NULL CHECK (status IN ('open', 'released', 'confirmed_issue', 'needs_more_info')),
+    payment_token TEXT PRIMARY KEY REFERENCES payments(payment_token),
+    status TEXT NOT NULL CHECK (status IN ('open', 'released', 'stopped', 'contact_customer')),
     resolved_by TEXT,
     resolved_at TEXT,
     comment TEXT
@@ -81,22 +80,21 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 
 @dataclass
-class ClaimRecord:
-    claim_token: str
-    provider_token: str
-    bene_token: str
-    service_date: str | None
-    amount: float
-    is_inpatient: int
+class PaymentRecord:
+    payment_token: str
+    sender_token: str
+    receiver_token: str
+    paid_at: str | None
+    amount_usd: float
+    payment_format: str
     action: str
     anomaly: float
-    provider_risk: float | None
-    provider_claims: int
+    risk: float
     rules: list[str]
     reasons: dict[str, Any]
     model_ms: float
     backend: str
-    payload: dict[str, Any]          # raw claim incl. real identifiers -> encrypted
+    payload: dict[str, Any]             # raw payment incl. account numbers -> encrypted
     notes: list[tuple[str, str, dict]]  # (kind, template text, facts) queued for Granite
 
 
@@ -107,40 +105,32 @@ class Store:
         self.envelope = envelope
         with self.lock:
             self.conn.executescript(SCHEMA)
-            self._migrate()
             self.conn.commit()
         self.audit = AuditLog(self.conn, self.lock, checkpoint_path=checkpoint_path)
 
-    def _migrate(self) -> None:
-        """Bring databases created by earlier versions up to the current schema."""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(claims)")}
-        if "latency_ms" in cols and "model_ms" not in cols:  # v0.1: column held model time under a wrong name
-            self.conn.execute("ALTER TABLE claims RENAME COLUMN latency_ms TO model_ms")
-
     # ------------------------------------------------------------------ writes
-    def save_batch(self, records: Iterable[ClaimRecord], actor: str = "scorer") -> None:
-        """Claims, their notes, their cases and their audit entries in ONE transaction."""
+    def save_batch(self, records: Iterable[PaymentRecord], actor: str = "scorer") -> None:
+        """Payments, their notes, their cases and their audit entries in ONE transaction."""
         ts = now()
         with self.lock:
             try:
                 for r in records:
-                    sealed = self.envelope.seal_json(r.payload, aad=r.claim_token)
+                    sealed = self.envelope.seal_json(r.payload, aad=r.payment_token)
                     self.conn.execute(
-                        "INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (r.claim_token, r.provider_token, r.bene_token, ts, r.service_date, r.amount, r.is_inpatient,
-                         r.action, r.anomaly, r.provider_risk, r.provider_claims, ",".join(r.rules),
-                         json.dumps(r.reasons), r.model_ms, r.backend, sealed.key_id, sealed.nonce,
-                         sealed.ciphertext))
+                        "INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (r.payment_token, r.sender_token, r.receiver_token, ts, r.paid_at, r.amount_usd,
+                         r.payment_format, r.action, r.anomaly, r.risk, ",".join(r.rules), json.dumps(r.reasons),
+                         r.model_ms, r.backend, sealed.key_id, sealed.nonce, sealed.ciphertext))
                     for kind, text, facts in r.notes:
                         self.conn.execute(
-                            "INSERT INTO notes (claim_token, kind, status, source, text, facts, created_at, updated_at)"
+                            "INSERT INTO notes (payment_token, kind, status, source, text, facts, created_at, updated_at)"
                             " VALUES (?,?,?,?,?,?,?,?)",
-                            (r.claim_token, kind, "pending", "template", text, json.dumps(facts), ts, ts))
-                    if r.action == "HOLD_FOR_REVIEW":
-                        self.conn.execute("INSERT INTO cases (claim_token, status) VALUES (?, 'open')", (r.claim_token,))
-                    self.audit.append(actor, "claim_scored", r.claim_token, {
-                        "action": r.action, "provider": r.provider_token, "anomaly": round(r.anomaly, 4),
-                        "provider_risk": None if r.provider_risk is None else round(r.provider_risk, 4),
+                            (r.payment_token, kind, "pending", "template", text, json.dumps(facts), ts, ts))
+                    if r.action == "HOLD":
+                        self.conn.execute("INSERT INTO cases (payment_token, status) VALUES (?, 'open')",
+                                          (r.payment_token,))
+                    self.audit.append(actor, "payment_scored", r.payment_token, {
+                        "action": r.action, "risk": round(r.risk, 4), "anomaly": round(r.anomaly, 4),
                         "rules": r.rules, "backend": r.backend}, ts=ts, commit=False)
                 self.conn.commit()
             except Exception:
@@ -149,15 +139,15 @@ class Store:
                 raise
             self.audit.committed()
 
-    def resolve_case(self, claim_token: str, status: str, user: str, comment: str = "") -> bool:
+    def resolve_case(self, payment_token: str, status: str, user: str, comment: str = "") -> bool:
         with self.lock:
             cur = self.conn.execute(
-                "UPDATE cases SET status=?, resolved_by=?, resolved_at=?, comment=? WHERE claim_token=? AND status='open'",
-                (status, user, now(), comment[:500], claim_token))
-            if cur.rowcount == 0:  # unknown claim, or already resolved: a decision is never silently overwritten
+                "UPDATE cases SET status=?, resolved_by=?, resolved_at=?, comment=? WHERE payment_token=? AND status='open'",
+                (status, user, now(), comment[:500], payment_token))
+            if cur.rowcount == 0:  # unknown payment, or already resolved: a decision is never silently overwritten
                 self.conn.rollback()
                 return False
-            self.audit.append(user, "case_resolved", claim_token, {"status": status}, commit=False)
+            self.audit.append(user, "case_resolved", payment_token, {"status": status}, commit=False)
             self.conn.commit()
             self.audit.committed()
             return True
@@ -166,18 +156,18 @@ class Store:
     def claim_pending_notes(self, limit: int = 1) -> list[dict[str, Any]]:
         """Atomically move up to `limit` pending notes to 'working'.
 
-        Briefs (an investigator is waiting on a held payment) go first, then the NEWEST corrections: on a
-        small VM Granite writes about one note a minute, so the most recent claims get upgraded first and
+        Briefs (an analyst is waiting on a held payment) go first, then the NEWEST customer messages: on a
+        small VM Granite writes about one note a minute, so the most recent payments get upgraded first and
         older ones keep their (accurate) template text.
         """
         with self.lock:
             rows = self.conn.execute(
-                "SELECT id, claim_token, kind, facts FROM notes WHERE status='pending' "
+                "SELECT id, payment_token, kind, facts FROM notes WHERE status='pending' "
                 "ORDER BY CASE kind WHEN 'brief' THEN 0 ELSE 1 END, id DESC LIMIT ?", (limit,)).fetchall()
             for r in rows:
                 self.conn.execute("UPDATE notes SET status='working', updated_at=? WHERE id=?", (now(), r[0]))
             self.conn.commit()
-        return [{"id": r[0], "claim_token": r[1], "kind": r[2], "facts": json.loads(r[3])} for r in rows]
+        return [{"id": r[0], "payment_token": r[1], "kind": r[2], "facts": json.loads(r[3])} for r in rows]
 
     def complete_note(self, note_id: int, text: str | None, model: str, gen_ms: float, ok: bool) -> None:
         ok = bool(ok and text)
@@ -203,53 +193,51 @@ class Store:
     def notes_updated_since(self, ts: str) -> list[dict[str, Any]]:
         with self.lock:
             rows = self.conn.execute(
-                "SELECT n.id, n.claim_token, n.kind, n.status, n.source, n.text, n.updated_at, c.provider_token "
-                "FROM notes n JOIN claims c USING (claim_token) WHERE n.updated_at > ? AND n.status IN ('done','failed') "
+                "SELECT n.id, n.payment_token, n.kind, n.status, n.source, n.text, n.updated_at, p.sender_token "
+                "FROM notes n JOIN payments p USING (payment_token) WHERE n.updated_at > ? AND n.status IN ('done','failed') "
                 "ORDER BY n.updated_at", (ts,)).fetchall()
-        return [{"id": r[0], "claim_token": r[1], "kind": r[2], "status": r[3], "source": r[4], "text": r[5],
-                 "updated_at": r[6], "provider_token": r[7]} for r in rows]
+        return [{"id": r[0], "payment_token": r[1], "kind": r[2], "status": r[3], "source": r[4], "text": r[5],
+                 "updated_at": r[6], "sender_token": r[7]} for r in rows]
 
     # ------------------------------------------------------------------ reads
     def _notes_for(self, token: str) -> dict[str, dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT kind, status, source, text, model, gen_ms FROM notes WHERE claim_token=? ORDER BY id", (token,)
+            "SELECT kind, status, source, text, model, gen_ms FROM notes WHERE payment_token=? ORDER BY id", (token,)
         ).fetchall()
         return {r[0]: {"status": r[1], "source": r[2], "text": r[3], "model": r[4], "gen_ms": r[5]} for r in rows}
 
+    _KEYS = ["payment_token", "sender_token", "receiver_token", "received_at", "paid_at", "amount_usd",
+             "payment_format", "action", "anomaly", "risk", "rules", "reasons", "model_ms", "backend"]
+    _COLS = ", ".join(_KEYS)
+
     def _row(self, r) -> dict[str, Any]:
-        keys = ["claim_token", "provider_token", "bene_token", "received_at", "service_date", "amount",
-                "is_inpatient", "action", "anomaly", "provider_risk", "provider_claims", "rules", "reasons",
-                "model_ms", "backend"]
-        d = dict(zip(keys, r))
+        d = dict(zip(self._KEYS, r))
         d["rules"] = [x for x in d["rules"].split(",") if x]
         d["reasons"] = json.loads(d["reasons"])
         return d
 
-    _COLS = ("claim_token, provider_token, bene_token, received_at, service_date, amount, is_inpatient, action, "
-             "anomaly, provider_risk, provider_claims, rules, reasons, model_ms, backend")
-
     def list_cases(self, status: str = "open", limit: int = 100) -> list[dict[str, Any]]:
         with self.lock:
             rows = self.conn.execute(
-                f"SELECT {self._COLS}, k.status FROM claims c JOIN cases k USING (claim_token) "
-                "WHERE k.status=? ORDER BY c.provider_risk DESC, c.received_at DESC LIMIT ?", (status, limit)).fetchall()
+                f"SELECT {self._COLS}, k.status FROM payments p JOIN cases k USING (payment_token) "
+                "WHERE k.status=? ORDER BY p.risk DESC, p.received_at DESC LIMIT ?", (status, limit)).fetchall()
             out = []
             for r in rows:
                 d = self._row(r[:-1])
                 d["case_status"] = r[-1]
-                d["notes"] = self._notes_for(d["claim_token"])
+                d["notes"] = self._notes_for(d["payment_token"])
                 out.append(d)
         return out
 
-    def get_claim(self, token: str, decrypt: bool = False) -> dict[str, Any] | None:
+    def get_payment(self, token: str, decrypt: bool = False) -> dict[str, Any] | None:
         with self.lock:
-            r = self.conn.execute(f"SELECT {self._COLS}, key_id, nonce, ciphertext FROM claims WHERE claim_token=?",
+            r = self.conn.execute(f"SELECT {self._COLS}, key_id, nonce, ciphertext FROM payments WHERE payment_token=?",
                                   (token,)).fetchone()
             if r is None:
                 return None
             d = self._row(r[:-3])
             d["notes"] = self._notes_for(token)
-            k = self.conn.execute("SELECT status, resolved_by, resolved_at, comment FROM cases WHERE claim_token=?",
+            k = self.conn.execute("SELECT status, resolved_by, resolved_at, comment FROM cases WHERE payment_token=?",
                                   (token,)).fetchone()
         d["case"] = dict(zip(["status", "resolved_by", "resolved_at", "comment"], k)) if k else None
         if decrypt:
@@ -257,11 +245,11 @@ class Store:
         return d
 
     def iter_payloads(self, chunk: int = 5000):
-        """Decrypted raw claims in arrival order (for rebuilding in-memory state after a restart)."""
+        """Decrypted raw payments in arrival order (for rebuilding in-memory state after a restart)."""
         last = 0
         while True:
             with self.lock:
-                rows = self.conn.execute("SELECT rowid, claim_token, key_id, nonce, ciphertext FROM claims "
+                rows = self.conn.execute("SELECT rowid, payment_token, key_id, nonce, ciphertext FROM payments "
                                          "WHERE rowid > ? ORDER BY rowid LIMIT ?", (last, chunk)).fetchall()
             if not rows:
                 return
@@ -269,31 +257,32 @@ class Store:
                 yield self.envelope.open_json(Sealed(kid, nonce, ct), aad=token)
             last = rows[-1][0]
 
-    def provider_claims(self, provider_token: str, limit: int = 100) -> list[dict[str, Any]]:
-        """What a provider may see: their own non-paid claims with the correction note (never the brief)."""
+    def customer_payments(self, sender_token: str, limit: int = 100) -> list[dict[str, Any]]:
+        """What a customer may see: their own warned/held payments and the message for them (never the brief)."""
         with self.lock:
             rows = self.conn.execute(
-                f"SELECT {self._COLS} FROM claims WHERE provider_token=? AND action!='PAY' "
-                "ORDER BY received_at DESC LIMIT ?", (provider_token, limit)).fetchall()
+                f"SELECT {self._COLS} FROM payments WHERE sender_token=? AND action!='ALLOW' "
+                "ORDER BY received_at DESC LIMIT ?", (sender_token, limit)).fetchall()
             out = []
             for r in rows:
                 d = self._row(r)
-                notes = self._notes_for(d["claim_token"])
-                # minimal disclosure: what to fix, never internal scores or other providers' patterns
+                notes = self._notes_for(d["payment_token"])
+                # minimal disclosure: why we're checking, never risk scores or the analyst's brief
                 out.append({
-                    "claim_token": d["claim_token"], "service_date": d["service_date"], "amount": d["amount"],
-                    "action": d["action"], "received_at": d["received_at"], "note": notes.get("correction"),
-                    "reasons": {"rules": d["reasons"].get("rules", []), "claim": d["reasons"].get("claim", [])},
+                    "payment_token": d["payment_token"], "paid_at": d["paid_at"], "amount_usd": d["amount_usd"],
+                    "payment_format": d["payment_format"], "action": d["action"], "received_at": d["received_at"],
+                    "message": notes.get("warning"),
+                    "reasons": {"rules": d["reasons"].get("rules", []), "customer": d["reasons"].get("customer", [])},
                 })
         return out
 
     def aggregates(self) -> dict[str, Any]:
         """Auditor view: counts and sums only, no identifiers."""
         with self.lock:
-            mix = dict(self.conn.execute("SELECT action, COUNT(*) FROM claims GROUP BY action").fetchall())
-            money = dict(self.conn.execute("SELECT action, SUM(amount) FROM claims GROUP BY action").fetchall())
+            mix = dict(self.conn.execute("SELECT action, COUNT(*) FROM payments GROUP BY action").fetchall())
+            money = dict(self.conn.execute("SELECT action, SUM(amount_usd) FROM payments GROUP BY action").fetchall())
             cases = dict(self.conn.execute("SELECT status, COUNT(*) FROM cases GROUP BY status").fetchall())
             notes = dict(self.conn.execute("SELECT source, COUNT(*) FROM notes GROUP BY source").fetchall())
-            backends = dict(self.conn.execute("SELECT backend, COUNT(*) FROM claims GROUP BY backend").fetchall())
-        return {"decisions": mix, "amount_by_decision": money, "cases": cases, "notes_by_source": notes,
-                "backends": backends, "total_claims": sum(mix.values())}
+            backends = dict(self.conn.execute("SELECT backend, COUNT(*) FROM payments GROUP BY backend").fetchall())
+        return {"decisions": mix, "amount_usd_by_decision": money, "cases": cases, "notes_by_source": notes,
+                "backends": backends, "total_payments": sum(mix.values())}

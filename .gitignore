@@ -1,6 +1,5 @@
-# data, models and secrets never go in git
-shared/data/
-shared/models/
+# data, models and secrets never go in git (everything under shared/ is data or model output)
+shared/
 *.gguf
 *.pem
 *.key

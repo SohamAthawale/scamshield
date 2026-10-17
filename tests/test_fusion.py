@@ -1,121 +1,126 @@
-"""fusion.py: every branch of decide() and the Policy merge rules."""
+"""fusion.py: ALLOW / WARN / HOLD, threshold edges, Policy validation and merge rules."""
+import itertools
 import json
 
+import numpy as np
 import pytest
 
-from claimsense.fusion import ACTIONS, HOLD, PAY, RETURN, Decision, Policy, decide
+from scamshield.fusion import ACTIONS, ALLOW, HOLD, WARN, Decision, Policy, decide
+from scamshield.training import decisions
 
-POLICY = Policy(anomaly_threshold=1.0, provider_threshold=0.5, min_provider_claims=10)
+POL = Policy(anomaly_threshold=1.0, warn_threshold=0.3, hold_threshold=0.8)
 
 
-@pytest.mark.parametrize("anomaly,risk,n,errs,action", [
-    (0.1, 0.1, 50, [], PAY),                         # nothing unusual
-    (0.1, 0.9, 50, [], PAY),                         # risky provider alone never blocks a normal claim
-    (2.0, 0.1, 50, [], RETURN),                      # unusual claim, normal provider
-    (0.1, 0.1, 50, ["missing_attending"], RETURN),   # rule broken, normal provider
-    (2.0, 0.9, 50, [], HOLD),                        # unusual claim AND risky provider
-    (0.1, 0.9, 50, ["duplicate"], HOLD),             # rule broken AND risky provider
-    (2.0, 0.9, 9, [], RETURN),                       # risky but not enough history -> honest mistake
-    (2.0, None, 50, [], RETURN),                     # no provider score at all
-    (0.1, None, 50, [], PAY),
+@pytest.mark.parametrize("anomaly,risk,rules,action", [
+    (0.0, 0.0, [], ALLOW),
+    (0.0, 0.29, [], ALLOW),
+    (0.0, 0.3, [], WARN),                      # warn threshold inclusive
+    (0.0, 0.79, [], WARN),
+    (0.0, 0.8, [], HOLD),                      # hold threshold inclusive
+    (5.0, 0.99, ["big_new_payee"], HOLD),      # hold wins over everything
+    (1.0, 0.0, [], WARN),                      # anomaly threshold inclusive
+    (0.99, 0.0, [], ALLOW),
+    (0.0, 0.0, ["big_new_payee"], WARN),       # any rule warns
+    (0.0, 0.0, ["anything"], WARN),
+    (5.0, 0.5, ["big_new_payee"], WARN),
 ])
-def test_decide_branches(anomaly, risk, n, errs, action):
-    d = decide(anomaly, risk, n, errs, POLICY)
-    assert d.action == action
-    assert d.action in ACTIONS
+def test_decide(anomaly, risk, rules, action):
+    d = decide(anomaly, risk, rules, POL)
+    assert d.action == action and d.action in ACTIONS
 
 
-def test_anomaly_threshold_is_inclusive():
-    assert decide(1.0, 0.0, 50, [], POLICY).anomaly_flag is True
-    assert decide(1.0, 0.0, 50, [], POLICY).action == RETURN
-    assert decide(0.999999, 0.0, 50, [], POLICY).action == PAY
-
-
-def test_provider_threshold_is_inclusive():
-    assert decide(2.0, 0.5, 50, [], POLICY).action == HOLD
-    assert decide(2.0, 0.4999, 50, [], POLICY).action == RETURN
-
-
-def test_min_provider_claims_is_inclusive():
-    d = decide(2.0, 0.9, 10, [], POLICY)
-    assert d.provider_ready and d.provider_flag and d.action == HOLD
-    d = decide(2.0, 0.9, 9, [], POLICY)
-    assert not d.provider_ready and not d.provider_flag and d.action == RETURN
-
-
-def test_provider_risk_none_is_not_ready():
-    d = decide(2.0, None, 1000, ["after_death"], POLICY)
-    assert d.provider_risk is None and not d.provider_ready and not d.provider_flag
-    assert d.action == RETURN
-
-
-def test_decision_fields_and_to_dict():
-    errs = ["end_before_start"]
-    d = decide(3, 0.7, 12, errs, POLICY)
-    assert isinstance(d.anomaly, float) and d.anomaly == 3.0
-    assert d.hard_errors == errs and d.hard_errors is not errs   # defensive copy
-    assert d.to_dict() == {"action": HOLD, "anomaly": 3.0, "anomaly_flag": True, "provider_risk": 0.7,
-                           "provider_ready": True, "provider_flag": True, "hard_errors": errs}
+def test_decision_fields():
+    rules = ["big_new_payee"]
+    d = decide(2, 0.5, rules, POL)
+    assert d == Decision(WARN, 0.5, 2.0, True, ["big_new_payee"])
+    assert d.rules is not rules and isinstance(d.risk, float) and isinstance(d.anomaly, float)
+    assert d.to_dict() == {"action": WARN, "risk": 0.5, "anomaly": 2.0, "anomaly_flag": True,
+                           "rules": ["big_new_payee"]}
     json.dumps(d.to_dict())
-    assert isinstance(d, Decision)
+    assert decide(0, 0.9, [], POL).anomaly_flag is False
 
 
-def test_hard_errors_alone_do_not_set_anomaly_flag():
-    d = decide(0.0, 0.0, 50, ["missing_attending"], POLICY)
-    assert d.anomaly_flag is False and d.action == RETURN
+def test_policy_rejects_warn_above_hold():
+    with pytest.raises(ValueError):
+        Policy(1.0, 0.9, 0.8)
+    Policy(1.0, 0.8, 0.8)                         # equal is allowed: no risk-only warnings
+
+
+def test_equal_warn_and_hold_means_risk_alone_never_warns():
+    p = Policy(1.0, 0.5, 0.5)
+    assert decide(0, 0.49, [], p).action == ALLOW and decide(0, 0.5, [], p).action == HOLD
+
+
+def test_vectorised_decisions_equal_decide_on_a_grid():
+    """training.decisions (used to tune and report) must agree with fusion.decide (used live)."""
+    risks = [0.0, 0.29999, 0.3, 0.5, 0.79999, 0.8, 1.0]
+    anomalies = [0.0, 0.99, 1.0, 3.0]
+    combos = list(itertools.product(risks, anomalies, [False, True]))
+    r = np.array([c[0] for c in combos])
+    a = np.array([c[1] for c in combos])
+    ru = np.array([c[2] for c in combos])
+    vec = decisions(r, a, ru, POL)
+    for (risk, anom, rule), v in zip(combos, vec):
+        assert v == decide(anom, risk, ["big_new_payee"] if rule else [], POL).action
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_vectorised_decisions_equal_decide_random(seed):
+    rng = np.random.default_rng(seed)
+    w, h = sorted(rng.random(2))
+    pol = Policy(float(rng.random() * 2), float(w), float(h))
+    r, a, ru = rng.random(500), rng.random(500) * 2, rng.random(500) < 0.1
+    vec = decisions(r, a, ru, pol)
+    assert all(v == decide(float(ai), float(ri), ["x"] if ui else [], pol).action
+               for v, ri, ai, ui in zip(vec, r, a, ru))
 
 
 # ------------------------------------------------------------------------------ Policy.load
-def write(path, obj):
-    path.write_text(json.dumps(obj))
-    return path
+def write(p, obj):
+    p.write_text(json.dumps(obj))
+    return p
 
 
-def test_policy_load_learned_values_when_policy_is_null(tmp_path):
-    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 0.8, "provider_threshold": 0.3,
-                                              "min_provider_claims": 7})
-    pol = write(tmp_path / "policy.json", {"anomaly_threshold": None, "provider_threshold": None,
-                                           "min_provider_claims": None})
-    assert Policy.load(pol, th) == Policy(0.8, 0.3, 7)
+def test_policy_load_null_means_learned(tmp_path):
+    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 2.0, "warn_threshold": 0.2, "hold_threshold": 0.9,
+                                              "hold_cap": 0.002})
+    pol = write(tmp_path / "policy.json", {"anomaly_threshold": None, "warn_threshold": None, "hold_threshold": None})
+    assert Policy.load(pol, th) == Policy(2.0, 0.2, 0.9)
 
 
-def test_policy_load_manual_values_override_learned(tmp_path):
-    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 0.8, "provider_threshold": 0.3,
-                                              "min_provider_claims": 7})
-    pol = write(tmp_path / "policy.json", {"anomaly_threshold": 1.5, "provider_threshold": None,
-                                           "min_provider_claims": 20})
-    assert Policy.load(pol, th) == Policy(1.5, 0.3, 20)
-
-
-def test_policy_load_zero_is_an_override_not_null(tmp_path):
-    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 0.8, "provider_threshold": 0.3})
-    pol = write(tmp_path / "policy.json", {"anomaly_threshold": 0, "provider_threshold": 0.0})
-    p = Policy.load(pol, th)
-    assert p.anomaly_threshold == 0.0 and p.provider_threshold == 0.0
+def test_policy_load_manual_overrides_and_comments_ignored(tmp_path):
+    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 2.0, "warn_threshold": 0.2, "hold_threshold": 0.9})
+    pol = write(tmp_path / "policy.json", {"_comment": "hand-set", "_hold_threshold": 0.0, "warn_threshold": 0.5,
+                                           "hold_threshold": None, "anomaly_threshold": 0})
+    assert Policy.load(pol, th) == Policy(0.0, 0.5, 0.9)
 
 
 def test_policy_load_without_thresholds_file(tmp_path):
-    pol = write(tmp_path / "policy.json", {"anomaly_threshold": 1, "provider_threshold": "0.5"})
+    pol = write(tmp_path / "policy.json", {"anomaly_threshold": 1, "warn_threshold": "0.25", "hold_threshold": 0.75})
     p = Policy.load(pol)
-    assert p == Policy(1.0, 0.5, 10)
-    assert isinstance(p.anomaly_threshold, float) and isinstance(p.min_provider_claims, int)
+    assert p == Policy(1.0, 0.25, 0.75) and isinstance(p.anomaly_threshold, float)
 
 
-def test_policy_load_default_min_claims(tmp_path):
-    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 0.8, "provider_threshold": 0.3})
-    pol = write(tmp_path / "policy.json", {"min_provider_claims": None})
-    assert Policy.load(pol, th).min_provider_claims == 10
-
-
-def test_policy_load_missing_value_everywhere_raises(tmp_path):
-    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 0.8})
-    pol = write(tmp_path / "policy.json", {"provider_threshold": None})
+def test_policy_load_missing_value_raises(tmp_path):
+    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 2.0, "warn_threshold": 0.2})
+    pol = write(tmp_path / "policy.json", {"hold_threshold": None})
     with pytest.raises(KeyError):
         Policy.load(pol, th)
 
 
-def test_policy_load_ignores_extra_keys(tmp_path):
-    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 0.8, "provider_threshold": 0.3,
-                                              "val_precision": 0.9})
-    pol = write(tmp_path / "policy.json", {"comment": "hand-set", "anomaly_threshold": None})
-    assert Policy.load(pol, th) == Policy(0.8, 0.3, 10)
+def test_policy_load_validates_merged_values(tmp_path):
+    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 2.0, "warn_threshold": 0.2, "hold_threshold": 0.9})
+    pol = write(tmp_path / "policy.json", {"warn_threshold": 0.95})
+    with pytest.raises(ValueError):
+        Policy.load(pol, th)
+
+
+def test_repo_policy_file_loads_with_learned_thresholds(tmp_path):
+    from pathlib import Path
+
+    repo_policy = Path(__file__).resolve().parents[1] / "config" / "policy.json"
+    if not repo_policy.exists():
+        pytest.skip("config/policy.json not present")
+    th = write(tmp_path / "thresholds.json", {"anomaly_threshold": 2.0, "warn_threshold": 0.2, "hold_threshold": 0.9})
+    p = Policy.load(repo_policy, th)
+    assert p.warn_threshold <= p.hold_threshold

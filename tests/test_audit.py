@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from claimsense.audit import GENESIS, AuditLog, canonical, row_hash
+from scamshield.audit import GENESIS, AuditLog, canonical, row_hash
 
 
 @pytest.fixture

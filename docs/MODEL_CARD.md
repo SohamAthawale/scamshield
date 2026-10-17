@@ -1,127 +1,159 @@
-# Model card: ClaimSense
+# Model card: ScamShield
 
-All numbers come from the training run on the IBM z17 VM (`docs/evidence/training/metrics_vm.json`) and the replays in `docs/evidence/`.
+All numbers come from the training run on the IBM z17 VM (`docs/evidence/training/metrics_vm.json`), the live replays (`docs/evidence/replay/`) and the notebooks executed on the VM (`notebooks/`).
 
-## What the models are for
+## What it is for
 
-ClaimSense scores every Medicare-style claim before payment and picks one of three actions:
+Every payment is scored before it is sent:
 
 | Action | When | Who sees it |
 |---|---|---|
-| `PAY` | nothing unusual | nobody needs to act |
-| `RETURN_WITH_FIX` | the claim breaks a billing rule or is unusual, and the provider's pattern is not high risk | the billing office, with a plain-language fix |
-| `HOLD_FOR_REVIEW` | the claim is unusual or breaks a rule, **and** the provider's rolling pattern scores as high risk | an investigator, with an evidence brief. **A human decides.** |
+| `ALLOW` | nothing unusual | nobody needs to act |
+| `WARN` | risk ≥ warn threshold, **or** the payment is unusual for this customer, **or** it is a big first payment to a new payee | the customer, with a specific warning. **They decide.** |
+| `HOLD` | risk ≥ hold threshold | the payment waits; an analyst calls the customer back on a known number. **A human decides.** |
 
-The models produce **risk estimates, not findings of fraud**. Nothing is ever denied automatically.
+The scores are **model estimates, not findings of fraud**. Nothing is reported, frozen or refused automatically.
 
 ## Data
 
-- Public Kaggle dataset *Healthcare Provider Fraud Detection Analysis* (rohitrox), downloaded from a GitHub mirror and checked against the Kaggle row and label counts (`docs/ENV_REPORT.md`).
-- 558,211 claims (40,474 inpatient, 517,737 outpatient), 138,556 beneficiaries and 5,410 providers.
-- 506 providers (9.4%) are labelled "potential fraud". **The labels are per provider, not per claim.**
-- The data is synthetic, US Medicare-style, from late 2008 to the end of 2009. It contains no real patients.
-- **Split by provider**, never by claim, stratified on the label: 70/15/15 with seed 42, giving 3,787 train, 812 validation and 811 test providers. The demo stream is the test providers' claims in time order.
+- **IBM "Transactions for Anti Money Laundering", HI-Small** (AMLworld; Altman et al., NeurIPS 2023 Datasets track; generated with IBM AMLSim; licence CDLA-Sharing-1.0).
+  - Downloaded from Hugging Face mirrors; two independent mirrors are byte-identical (SHA-256 in `docs/ENV_REPORT.md`).
+  - It is **synthetic**: no real person's data.
+- **Size:** 5,078,345 payments, 515k accounts, 15 currencies, 7 payment formats. 0.10% are labelled laundering, belonging to 740 typed schemes (fan-in, fan-out, cycle, bipartite, stack, scatter-gather, gather-scatter, random).
+- **Artifact removed:** after 10 September the generator stops producing normal traffic while laundering continues (up to 70% of the late rows are laundering). Those days are cut, leaving **5,077,237 payments, 4,522 laundering**.
+- **Split by time,** as a bank deploys:
 
-## Features (`src/claimsense/features.py`)
+  | Split | Days | Payments | Laundering |
+  |---|---|---|---|
+  | Train | 1–6 Sep | 3,248,921 | 2,530 |
+  | Validation | 7–8 Sep | 965,524 | 1,036 |
+  | Test | 9–10 Sep | 862,792 | 956 |
 
-There are 19 claim features: amount, deductible, durations, code counts, physician fields, age, chronic conditions, coverage months, how rare the diagnosis/procedure pair is, and the amount relative to the typical amount for that diagnosis.
+## Features (`src/scamshield/features.py`)
 
-There are 19 provider features, computed as rolling aggregates that are updated one claim at a time: volume, amounts, inpatient share, stays, patients, physicians, claims per patient, rare-pair share, missing-attending share, and so on.
+**One streaming engine** computes every feature from the state *before* the payment, then updates it. Training runs the same engine over history, so train/serve parity holds by construction. We verified it: 50,000 test payments scored live gave 100% identical decisions, with risk scores equal to within 1e-16.
 
-The batch and streaming implementations are tested for parity, including on real data.
+| Group | Features |
+|---|---|
+| Payment (15) | log USD amount (rates derived from the data's own conversions), format one-hots, cross-bank, self-transfer, currency conversion, hour of day |
+| Payer history (9) | payments made and received, amount vs the payer's usual, **first payment to this payee**, number of payees, pass-through ratio, hours since previous payment, payments in the last day (decayed), new customer |
+| Receiving account / mule history (9) | inflows, outflows, distinct senders, fan-in share, pass-through ratio, share of inflows by ACH, hours since previous payment, inflows in the last day (decayed), new account |
 
-**Not used as inputs:** gender, race, state, county, and all identifiers. Identifiers are pseudonymised before features are computed.
+State is O(1) per account. The engine runs at about 4.4 µs per payment; 4.2M historical payments are replayed into it in 61 s on the z17.
 
 ## Models
 
-| | Provider risk | Claim anomaly |
+| | Risk | Customer behaviour |
 |---|---|---|
-| Algorithm | XGBoost 3.4.1 (hist; depth 4; eta 0.03; early stopping on validation PR-AUC; `scale_pos_weight`) | PyTorch 2.11 MLP autoencoder 19-14-7-14-19, trained only on claims from non-flagged training providers |
-| Training trick | trained on each provider's history at 25/50/75/100%, so it works while a provider's history is still filling up in the live stream | inputs standardised and clipped to ±8σ |
-| Serving | XGBoost on CPU (about 85 µs per provider) | `torch_nnpa` on the Telum II NNPA for batches of 256 or more claims (chunks of up to 4,096), CPU below that |
-| Explanations | SHAP contributions (`pred_contribs`) plus peer percentiles | per-feature reconstruction error, keeping features with at least 10% of the error |
+| Algorithm | XGBoost 3.4.1 (hist, depth 7, eta 0.05), early stopping on validation PR-AUC. **Saved trimmed to the best iteration.** | PyTorch 2.11 autoencoder (24-16-8-16-24) over the payment and payer-history features |
+| Trained on | all training days; negatives subsampled to 25% and re-weighted | normal training payments only |
+| Serving | CPU, about 85 µs per payment | `torch_nnpa` on the Telum II NNPA for calls of ≥1,024 payments (chunks of up to 4,096), CPU below that |
+| Explanations | SHAP contributions (`pred_contribs`) | per-feature reconstruction error (features carrying ≥10% of the error) |
 
-## Results (held-out test providers)
+The "trimmed" note matters. The full booster also held the 100 early-stopping patience rounds, so the API was at first scoring with a slightly different model from the one the thresholds were tuned on (risk scores off by up to 0.27). We found this with the parity check and fixed it.
 
-### Provider model
+**Rule** (`big_new_payee`): a first payment to this payee, by a customer with at least 5 prior payments, at ≥10× their usual amount.
+- On test it fires on 0.12% of payments with **9.2% precision (≈80× the base rate)**.
+- Two other rules were tested and dropped:
+  - "receiver suddenly collecting from many senders": only 2.7× lift;
+  - "money passes straight through": no lift.
 
-| Metric | full history | first 25% of history |
-|---|---|---|
-| ROC-AUC | **0.942** | 0.928 |
-| PR-AUC (base rate 0.094) | **0.675** | 0.655 |
-| Precision in top 5% of providers | 0.732 | 0.780 |
-| Recall in top 5% of providers | 0.395 | 0.421 |
+## Results on the unseen test days
 
-### Claim autoencoder
-
-- The threshold is the 99th percentile of reconstruction error on clean validation claims (2.958), which flags 0.95% of test claims.
-- **On its own it does not detect fraud.** ROC-AUC against the provider label is 0.52. That is expected: it finds *unusual claims*, and fraud is labelled per provider. Its job is spotting errors, and it surfaced the zero-coverage eligibility problem by itself (see rules).
-
-### Decisions when the test stream is replayed through the real engine
+### Risk model
 
 | | Validation | Test |
 |---|---|---|
-| Pay / return / hold | 98.70% / 0.72% / 0.58% | 98.78% / 0.73% / 0.50% |
-| Held claims that come from flagged providers | 70.3% | **61.4%** (base rate 36.2%) |
+| ROC-AUC | 0.986 | **0.984** |
+| PR-AUC (base rate 0.11%) | 0.615 | **0.564** |
+| Best F1 (precision / recall) | 0.643 (0.88 / 0.51) | **0.587 (0.85 / 0.45)** |
 
-The hold threshold was tuned on **validation**: the lowest provider risk at which at least 70% of held claims come from flagged providers, with at most 2% of claims held. That gave 0.56. The test figure, 61%, is lower than validation because only a few hundred claims are held.
+### Decisions
 
-### Injected honest billing errors (live replay on the VM)
+Thresholds were tuned on **validation days only**:
+- hold = the lowest risk with ≥60% precision while holding ≤0.2% of payments;
+- warnings come from a budget of 1.25% of payments;
+- the anomaly threshold is the 99.9th percentile of normal validation payments.
 
-The public data has almost none of these errors, so the simulator injects them; the API is never told which claims they are:
-
-| Error | Caught |
-|---|---|
-| service after date of death | 13/13 |
-| end date before start date | 13/13 |
-| duplicate submission | 13/13 |
-| missing attending physician | 13/13 |
-| no Part A/B coverage for the service | 13/13 |
-| amount with an extra zero (×10) | **1/13** |
-
-## Hard rules (deterministic)
-
-The rules are: after death, end before start, discharge before admission, missing attending physician, duplicate, and no coverage.
-
-`no_coverage` was added after the autoencoder kept flagging claims for patients with 0 months of Part A or B coverage. Every such claim was already being returned. The rule gives them a specific reason and fix (0.37% of claims).
-
-## Fairness (`notebooks/03_fairness.ipynb`, test stream)
-
-| Attribute | Flag-rate spread (max/min) | Notes |
+| | Validation | Test |
 |---|---|---|
-| Gender (codes 1, 2) | 1.04 | even |
-| Race (codes 1, 2, 3, 5) | 1.44 | code 2 is flagged 1.22× the average; claims from honest providers in that group are flagged 1.71% vs 1.25% |
-| Age band | 1.81 | under-65s are flagged 1.25×, over-85s 0.69× |
-| State (47 groups with ≥200 claims) | 4.6 | mostly small-sample noise |
+| Allow / warn / hold | 98.66% / 1.24% / 0.10% | 98.26% / 1.63% / 0.11% |
+| Hold precision | 60.0% | **53.3%** |
+| Laundering payments paused | 56.8% | **52.2%** |
+| Laundering payments warned or paused | 81.4% | **82.0%** |
+| Laundered USD paused | $337M of $460M | **$269M of $424M** |
+| Schemes with ≥1 payment paused | 145/157 | **150/174** |
 
-**Interpretation.**
-- In Medicare, under-65 beneficiaries are mostly people with disabilities or ESRD. They are a minority, so an unsupervised model treats them as "unusual". This is a known risk of anomaly detection.
-- The race gap comes through correlated features, because race is not an input.
+Schemes broken on test, by pattern:
+
+| Pattern | Broken |
+|---|---|
+| bipartite | 12/16 |
+| cycle | 19/22 |
+| fan-in | 16/18 |
+| fan-out | 18/20 |
+| gather-scatter | 32/37 |
+| random | 14/17 |
+| scatter-gather | 19/22 |
+| stack | 20/22 |
+
+### Customer-behaviour model
+
+- Flags 0.12% of test payments.
+- ROC-AUC 0.71 against the laundering label. These labels mark the *mule* side, while this model watches the *victim* side, so they can't fully measure it. That's why the simulator injects victim payments.
+
+### Injected payments
+
+**Live replay on the VM** (30k payments plus injections, 274 payments/s):
+
+| Injected payment | Warned | Paused | Allowed |
+|---|---|---|---|
+| Victim → mule account | 37 | 18 | 2 |
+| Honest, to a brand-new account | 40 | 16 | 1 |
+
+**Offline, 290 of each kind** (`docs/evidence/replay/victim_vs_honest_offline.md`): victims, honest payees with history and brand-new accounts all get the **same** mix, about 32% paused, 64% warned and 4–6% allowed.
+
+## Fairness (`notebooks/03_fairness.ipynb`)
+
+There are no demographics in this data. We audit the false-alarm rate (honest payments warned or held) by proxies:
+
+- **Currency (a proxy for migrant communities):**
+  - all fiat currencies sit at 1.6–2.3%;
+  - Brazil Real is 1.31× the overall rate, Saudi Riyal 1.24×, Rupee 1.13×, Yuan 1.09×;
+  - Bitcoin is 0.17×.
+  - So no currency group is singled out, though the spread deserves monitoring.
+- **Payment format:**
+  - **honest ACH payments are warned 11.1% of the time** (6.4× overall), because most laundering moves by ACH;
+  - cheque, card and cash sit at 0.1–0.4%.
+- **Bank size:**
+  - customers of the smallest banks (<100 payments in the test days) see 3.2% false alarms;
+  - customers of the biggest banks see 0.65% (5×).
 
 **Mitigations in place:**
-- A returned claim only asks the billing office to check, and the fix is spelled out.
-- Holds always go to a human, with the reasons shown.
-- The investigator brief always says "not a finding of fraud".
+- warnings never block;
+- holds always go to a human;
+- every decision carries its reasons.
 
 **Next steps:**
-- per-group anomaly thresholds, or removing age from the claim model;
+- per-segment warning budgets (by format and bank size);
 - re-measuring with the notebook;
 - adding fairness to the release checklist.
 
 ## Limitations
 
-- **Synthetic, provider-level labels.** We cannot measure claim-level fraud precision.
-- **Amount typos are mostly missed.** In this dataset, amounts for the same diagnosis vary so much that about 10% of honest claims already exceed 5× the typical amount. Any rule that catches typos would also return 5 to 30% of honest claims; we tested both global and per-provider baselines and rejected them. Real Australian MBS items have scheduled fees, where an extra zero becomes a deterministic check.
-- **Provider risk needs history.** A provider is not risk-scored until it has 10 claims, so a brand-new provider's odd claim is returned, never held.
-- **Granite (2B, Q8_0) writes a note in about 1–2 minutes on the 3-vCPU VM.** A template note, built from the same facts, is shown instantly.
-- **The models are trained on 2009 US-style data.** Production use would need local data, recalibration and monitoring.
+- **The data is synthetic** (AMLSim), and labels mark laundering networks, not individual scam victims.
+- **The victim side can't be separated from honest unusual payments in this data,** because receiver history doesn't distinguish the mule accounts. Real deployments would add evidence the dataset lacks: Confirmation of Payee mismatches, mule reports shared between banks (e.g. AFCX), and account age.
+- **About 87% of laundering is ACH.** Laundering by cash, cheque or card is mostly missed.
+- **The rolling state is built from 8 days of history.** Real use needs months, and recalibration and drift monitoring.
+- **Granite (2B, Q8_0) takes about 1–2 minutes per note on 3 vCPUs.** The template message, built from the same facts, is instant.
 
-## Explanations by Granite
+## Granite
 
-- `granite-3.3-2b-instruct` (big-endian GGUF, Q8_0) runs on the VM with llama.cpp built with the zDNN backend.
-- **Input:** only structured, pseudonymised facts (rule titles and fixes, feature labels and values, peer percentiles, provider token and risk). No identifiers or personal details reach the prompt.
+- **Model:** `granite-3.3-2b-instruct` (big-endian GGUF, Q8_0) via llama.cpp built with zDNN, on the VM.
+- **Input:** only structured, pseudonymised facts (rule text, feature labels and values, risk drivers, payment token, risk score).
+- **Prompts** forbid adding numbers that aren't in the facts. That instruction was added after an early brief invented a "second payment to this payee".
 - **Output guards:**
-  - rejected if it contains anything shaped like a raw ID;
-  - trimmed to the last full sentence if it hits the token limit;
-  - briefs always end with "not a finding of fraud";
-  - on any failure the template note stays.
+  - rejected if it contains anything shaped like an account number;
+  - trimmed to the last full sentence at the token limit;
+  - briefs always carry "not a finding of fraud";
+  - on any failure the template message stays.

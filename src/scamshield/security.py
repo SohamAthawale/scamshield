@@ -16,7 +16,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-TOKEN_PREFIX = {"bene": "B", "provider": "P", "physician": "D", "claim": "C"}
+TOKEN_PREFIX = {"account": "A", "payment": "T"}
 
 
 class Pseudonymizer:
@@ -115,7 +115,7 @@ SECRET_FILES = {
 
 
 def secrets_dir() -> Path:
-    return Path(os.environ.get("CLAIMSENSE_SECRETS", "/run/secrets"))
+    return Path(os.environ.get("SCAMSHIELD_SECRETS", "/run/secrets"))
 
 
 def read_secret(name: str, base: Path | None = None) -> str:

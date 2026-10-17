@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-AE_HIDDEN = (14, 7, 14)
+AE_HIDDEN = (16, 8, 16)
 Z_CLIP = 8.0
 
 
@@ -27,19 +27,19 @@ class Artifacts:
     @property
     def feature_context(self) -> Path: return self.root / "feature_context.json"
     @property
-    def scaler(self) -> Path: return self.root / "claim_scaler.json"
+    def scaler(self) -> Path: return self.root / "ae_scaler.json"
     @property
-    def ae_torch(self) -> Path: return self.root / "claim_ae.pt"
+    def ae_torch(self) -> Path: return self.root / "payment_ae.pt"
     @property
-    def ae_numpy(self) -> Path: return self.root / "claim_ae_weights.npz"
+    def ae_numpy(self) -> Path: return self.root / "payment_ae_weights.npz"
     @property
-    def ae_onnx(self) -> Path: return self.root / "claim_ae.onnx"
+    def ae_onnx(self) -> Path: return self.root / "payment_ae.onnx"
     @property
     def thresholds(self) -> Path: return self.root / "thresholds.json"
     @property
-    def provider_model(self) -> Path: return self.root / "provider_xgb.json"
+    def risk_model(self) -> Path: return self.root / "risk_xgb.json"
     @property
-    def provider_meta(self) -> Path: return self.root / "provider_meta.json"
+    def risk_meta(self) -> Path: return self.root / "risk_meta.json"
     @property
     def metrics(self) -> Path: return self.root / "metrics.json"
 

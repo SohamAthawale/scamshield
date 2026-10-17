@@ -1,6 +1,6 @@
 {
   "_comment": "Hand-set policy. null = use the learned value from shared/models/thresholds.json.",
   "anomaly_threshold": null,
-  "provider_threshold": null,
-  "min_provider_claims": 10
+  "warn_threshold": null,
+  "hold_threshold": null
 }

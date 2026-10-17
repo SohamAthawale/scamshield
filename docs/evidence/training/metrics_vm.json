@@ -1,112 +1,143 @@
 {
  "data": {
-  "claims": 558211,
-  "providers": 5410,
-  "providers_by_split": {
-   "size": {
-    "test": 811,
-    "train": 3787,
-    "val": 812
+  "payments": 5077237,
+  "laundering": 4522,
+  "by_split": {
+   "train": {
+    "payments": 3248921,
+    "laundering": 2530
    },
-   "sum": {
-    "test": 76,
-    "train": 354,
-    "val": 76
+   "val": {
+    "payments": 965524,
+    "laundering": 1036
+   },
+   "test": {
+    "payments": 862792,
+    "laundering": 956
    }
+  },
+  "accounts": 515078,
+  "usd_per_unit": {
+   "US Dollar": 1.0,
+   "Australian Dollar": 0.707814230640309,
+   "Yen": 0.009486474623958789,
+   "Yuan": 0.14930678017610985,
+   "Bitcoin": 11881.503549370207,
+   "Brazil Real": 0.1770961410756421,
+   "Canadian Dollar": 0.7579574371223884,
+   "Euro": 1.1717531250233932,
+   "Mexican Peso": 0.04729550812471387,
+   "Ruble": 0.012852466299784588,
+   "Rupee": 0.013615454964228014,
+   "Saudi Riyal": 0.2665817907068596,
+   "Shekel": 0.29611327859159986,
+   "Swiss Franc": 1.0928544328819552,
+   "UK Pound": 1.2915943156260998
   }
  },
- "provider_model": {
-  "val_history25": {
-   "n": 812,
-   "positives": 76,
-   "pr_auc": 0.6701311601114197,
-   "roc_auc": 0.9266125572082381,
-   "precision_top5pct": 0.8048780487804879,
-   "recall_top5pct": 0.4342105263157895,
-   "base_rate": 0.09359605911330049
+ "risk_model": {
+  "val": {
+   "n": 965524,
+   "positives": 1036,
+   "base_rate": 0.0010729924890525767,
+   "pr_auc": 0.615193522890817,
+   "roc_auc": 0.9861178115740381,
+   "best_f1": 0.6429447852760737,
+   "best_f1_precision": 0.8821548821548821,
+   "best_f1_recall": 0.5057915057915058,
+   "best_f1_threshold": 0.8531592488288879
   },
-  "val_history100": {
-   "n": 812,
-   "positives": 76,
-   "pr_auc": 0.725667954023961,
-   "roc_auc": 0.9436320080091533,
-   "precision_top5pct": 0.7317073170731707,
-   "recall_top5pct": 0.39473684210526316,
-   "base_rate": 0.09359605911330049
-  },
-  "test_history25": {
-   "n": 811,
-   "positives": 76,
-   "pr_auc": 0.6554432533657198,
-   "roc_auc": 0.9279985678481919,
-   "precision_top5pct": 0.7804878048780488,
-   "recall_top5pct": 0.42105263157894735,
-   "base_rate": 0.093711467324291
-  },
-  "test_history100": {
-   "n": 811,
-   "positives": 76,
-   "pr_auc": 0.6752955909859798,
-   "roc_auc": 0.9423737916219119,
-   "precision_top5pct": 0.7317073170731707,
-   "recall_top5pct": 0.39473684210526316,
-   "base_rate": 0.093711467324291
+  "test": {
+   "n": 862792,
+   "positives": 956,
+   "base_rate": 0.0011080306725143488,
+   "pr_auc": 0.5635636062462448,
+   "roc_auc": 0.9843536971406048,
+   "best_f1": 0.5868673050615596,
+   "best_f1_precision": 0.8478260869565217,
+   "best_f1_recall": 0.448744769874477,
+   "best_f1_threshold": 0.8635414242744446
   }
  },
  "autoencoder": {
-  "train_loss_by_epoch": [
-   0.6759353117623154,
-   0.31569101630194624,
-   0.25059892379666737,
-   0.2234592543091964,
-   0.20814723311099334,
-   0.19981692204908277,
-   0.194509896045413,
-   0.19107239842186752
+  "loss_by_epoch": [
+   0.6248515520191192,
+   0.25689240926265716,
+   0.14998259074052175,
+   0.1241885494407018,
+   0.11615699023882547,
+   0.11003799651066462
   ],
-  "threshold_quantile": 0.99,
-  "anomaly_threshold": 2.957554340362549,
-  "flag_rate_test": 0.009529989566633585,
-  "claim_auc_vs_provider_label_test": 0.5217274727301529,
-  "rule_hits_test": {
-   "after_death": 0,
-   "end_before_start": 0,
-   "discharge_before_admission": 0,
-   "missing_attending": 212,
-   "no_coverage": 282,
-   "duplicate": 1
-  }
+  "threshold_quantile": 0.999,
+  "anomaly_threshold": 0.9007520822882663,
+  "auc_vs_label_test": 0.7126145865474586,
+  "flag_rate_test": 0.0011706181791208078
+ },
+ "rules": {
+  "fire_rate_test": 0.0012471140205287021,
+  "precision_test": 0.09200743494423792
  },
  "thresholds": {
-  "anomaly_threshold": 2.957554340362549,
-  "provider_threshold": 0.56,
-  "min_provider_claims": 10,
-  "hold_cap": 0.02,
-  "min_hold_precision_val": 0.7
+  "anomaly_threshold": 0.9007520822882663,
+  "warn_threshold": 0.1281326860189438,
+  "hold_threshold": 0.7586358785629272,
+  "hold_min_precision_val": 0.6,
+  "hold_cap": 0.002,
+  "warn_budget": 0.0125
  },
- "decisions_val": {
-  "claims": 77383,
-  "mix": {
-   "PAY": 0.987,
-   "RETURN_WITH_FIX": 0.0072,
-   "HOLD_FOR_REVIEW": 0.0058
+ "decisions": {
+  "val": {
+   "payments": 965524,
+   "mix": {
+    "ALLOW": 0.9866,
+    "WARN": 0.01238,
+    "HOLD": 0.00101
+   },
+   "hold_precision": 0.6,
+   "warn_precision": 0.02132641967048591,
+   "laundering_recall_hold": 0.5675675675675675,
+   "laundering_recall_warn_or_hold": 0.8137065637065637,
+   "laundered_usd_total": 459714625.7628358,
+   "laundered_usd_held": 337009653.8393061,
+   "base_rate": 0.0010729924890525767,
+   "schemes_disrupted": {
+    "BIPARTITE": "9/9",
+    "CYCLE": "21/24",
+    "FAN-IN": "18/20",
+    "FAN-OUT": "18/20",
+    "GATHER-SCATTER": "23/23",
+    "RANDOM": "12/15",
+    "SCATTER-GATHER": "21/21",
+    "STACK": "23/25"
+   },
+   "schemes_disrupted_total": "145/157"
   },
-  "hold_precision_flagged_provider": 0.703125,
-  "return_share_from_flagged_provider": 0.11071428571428571,
-  "dollars_held": 1331850.0,
-  "base_rate_flagged_provider_claims": 0.3589031182559477
- },
- "decisions_test": {
-  "claims": 78594,
-  "mix": {
-   "PAY": 0.9878,
-   "RETURN_WITH_FIX": 0.0073,
-   "HOLD_FOR_REVIEW": 0.005
-  },
-  "hold_precision_flagged_provider": 0.6138107416879796,
-  "return_share_from_flagged_provider": 0.12631578947368421,
-  "dollars_held": 1265680.0,
-  "base_rate_flagged_provider_claims": 0.36154159350586557
+  "test": {
+   "payments": 862792,
+   "mix": {
+    "ALLOW": 0.98263,
+    "WARN": 0.01628,
+    "HOLD": 0.00108
+   },
+   "hold_precision": 0.5331196581196581,
+   "warn_precision": 0.020284697508896797,
+   "laundering_recall_hold": 0.5219665271966527,
+   "laundering_recall_warn_or_hold": 0.8200836820083682,
+   "laundered_usd_total": 424326853.0596404,
+   "laundered_usd_held": 269326101.9632745,
+   "base_rate": 0.0011080306725143488,
+   "schemes_disrupted": {
+    "BIPARTITE": "12/16",
+    "CYCLE": "19/22",
+    "FAN-IN": "16/18",
+    "FAN-OUT": "18/20",
+    "GATHER-SCATTER": "32/37",
+    "RANDOM": "14/17",
+    "SCATTER-GATHER": "19/22",
+    "STACK": "20/22"
+   },
+   "schemes_disrupted_total": "150/174"
+  }
  },
  "versions": {
   "xgboost": "3.4.1",
@@ -114,6 +145,6 @@
   "numpy": "2.0.2",
   "pandas": "3.0.6"
  },
- "seconds": 44.8,
+ "seconds": 236.7,
  "stream_file": "data/stream_test.csv"
 }

@@ -1,229 +1,229 @@
-"""scoring.Engine on tiny artifacts: order, provider state, batch == single, duplicates, reasons, snapshot."""
+"""scoring.Engine: same features as training, batch == single, reasons, replay, bootstrap, watchlist."""
 import json
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from claimsense.features import (CLAIM_FEATURES, PROVIDER_FEATURES, FeatureContext, ProviderState,
-                                 claim_features, hard_errors)
-from claimsense.fusion import HOLD, PAY, RETURN, Policy
-from claimsense.inference import load_anomaly_scorer, load_provider_scorer
-from claimsense.models import Artifacts, Standardizer
-from claimsense.scoring import ClaimInput, Engine
+from scamshield.features import ANOMALY_FEATURES, FEATURES, FeatureContext, rule_hits
+from scamshield.fusion import ALLOW, HOLD, WARN, Policy
+from scamshield.models import Artifacts, Standardizer
+from scamshield.scoring import AE_IDX, Engine, PaymentInput
+from scamshield.training import decisions, rule_matrix
 
-from conftest import attending_key, make_claims
-
-
-def to_items(df):
-    return [ClaimInput(claim=r, bene=r, provider_key=r["Provider"], bene_key=r["BeneID"],
-                       attending_key=attending_key(r)) for r in df.to_dict("records")]
+from conftest import policy_for, scorers
 
 
-@pytest.fixture(scope="module")
-def scorers(tiny_models_dir):
-    return {
-        "numpy": load_anomaly_scorer(tiny_models_dir, backend="numpy"),
-        "cpu": load_anomaly_scorer(tiny_models_dir, backend="cpu"),
-        "provider": load_provider_scorer(tiny_models_dir),
-    }
+def items_for(df: pd.DataFrame, ctx: FeatureContext) -> list[PaymentInput]:
+    out = []
+    for r in df.to_dict("records"):
+        ts = pd.Timestamp(r["ts"])
+        out.append(PaymentInput(ts.value / 6e10, r["sender"], r["receiver"], ctx.to_usd(r["amount_paid"], r["currency_paid"]),
+                                r["payment_format"], r["from_bank"] != r["to_bank"],
+                                r["currency_paid"] != r["currency_received"], ts.hour))
+    return out
 
 
 @pytest.fixture(scope="module")
-def claims():
-    return make_claims(seed=42, n=240, n_providers=5, unseen_share=0.1)
-
-
-@pytest.fixture(scope="module")
-def median_error(scorers, claims, ctx):
-    X = np.array([[claim_features(r, r, ctx)[k] for k in CLAIM_FEATURES] for r in claims.to_dict("records")])
-    err, _, _ = scorers["numpy"].score(X)
-    return float(np.median(err))
+def models(aml):
+    return {b: scorers(aml.models_dir, b) for b in ("numpy", "cpu")}
 
 
 @pytest.fixture
-def make_engine(scorers, ctx, median_error):
-    def _make(anomaly_threshold=None, provider_threshold=0.5, min_provider_claims=10, backend="numpy"):
-        thr = median_error if anomaly_threshold is None else anomaly_threshold
-        return Engine(ctx, scorers[backend], scorers["provider"], Policy(thr, provider_threshold, min_provider_claims))
-    return _make
+def engine(aml, models):
+    def make(backend="numpy", policy=None, bootstrap=True):
+        a, r = models[backend]
+        eng = Engine(aml.ctx, a, r, policy or policy_for(aml.models_dir))
+        if bootstrap:
+            eng.bootstrap(aml.tx[aml.split != "test"])
+        return eng
+    return make
 
 
-def test_score_batch_preserves_order_and_length(make_engine, claims, ctx):
-    items = to_items(claims)
-    out = make_engine().score_batch(items)
-    assert len(out) == len(items)
-    for it, res in zip(items, out):
-        assert res.claim_features == claim_features(it.claim, it.bene, ctx)
-        assert list(res.provider_features) == PROVIDER_FEATURES
-        assert res.model_ms >= 0
+@pytest.fixture
+def live(aml):
+    return items_for(aml.tx[aml.split == "test"], aml.ctx)
 
 
-def test_score_batch_empty(make_engine):
-    assert make_engine().score_batch([]) == []
+# ------------------------------------------------------------------------------ parity with training
+def test_engine_features_equal_training_features(aml, engine, live):
+    res = engine().score_batch(live)
+    X = np.array([[r.features[k] for k in FEATURES] for r in res], dtype=np.float32)
+    np.testing.assert_array_equal(X, aml.X[aml.split == "test"])
+    assert all(list(r.features) == FEATURES for r in res)
 
 
-def test_provider_state_count_increments(make_engine, claims):
-    eng = make_engine()
-    items = to_items(claims)
-    out = eng.score_batch(items)
-    seen = {}
-    for it, res in zip(items, out):
-        seen[it.provider_key] = seen.get(it.provider_key, 0) + 1
-        assert res.provider_claims == seen[it.provider_key]
-    assert {k: s.n for k, s in eng.providers.items()} == seen
-    res = eng.score(items[0])
-    assert res.provider_claims == seen[items[0].provider_key] + 1
-
-
-def test_provider_features_match_a_standalone_provider_state(make_engine, claims, ctx):
-    eng = make_engine()
-    items = to_items(claims)
-    out = eng.score_batch(items)
-    states = {}
-    for it, res in zip(items, out):
-        st = states.setdefault(it.provider_key, ProviderState())
-        st.update(claim_features(it.claim, it.bene, ctx), it.bene_key, it.attending_key, ctx.rare_pair_threshold)
-        assert res.provider_features == st.features()
+def test_engine_decisions_equal_vectorised_training_decisions(aml, engine, live, models):
+    res = engine().score_batch(live)
+    Xt = aml.X[aml.split == "test"]
+    a, r = models["numpy"]
+    err, _, _ = a.score(Xt[:, AE_IDX])
+    risk = r.predict(Xt)
+    expected = decisions(risk, err, rule_matrix(Xt, aml.ctx), policy_for(aml.models_dir))
+    assert [x.decision.action for x in res] == list(expected)
+    np.testing.assert_allclose([x.decision.risk for x in res], risk, rtol=0, atol=1e-12)
+    np.testing.assert_allclose([x.decision.anomaly for x in res], err, rtol=1e-6)
+    assert {ALLOW, WARN, HOLD} <= set(expected)
+    assert [x.decision.rules for x in res] == [rule_hits(x, aml.ctx) for x in Xt]
 
 
 @pytest.mark.parametrize("backend", ["numpy", "cpu"])
-def test_batch_equals_sequential_single_calls(make_engine, claims, backend):
-    items = to_items(claims)
-    batch = make_engine(backend=backend, min_provider_claims=5).score_batch(items)
-    eng = make_engine(backend=backend, min_provider_claims=5)
-    single = [eng.score(it) for it in items]
-    assert [r.decision.action for r in batch] == [r.decision.action for r in single]
-    assert [r.decision.hard_errors for r in batch] == [r.decision.hard_errors for r in single]
-    np.testing.assert_allclose([r.decision.anomaly for r in batch], [r.decision.anomaly for r in single],
-                               rtol=1e-5, atol=1e-6)
-    np.testing.assert_allclose([r.decision.provider_risk for r in batch],
-                               [r.decision.provider_risk for r in single], atol=1e-6)
-    # the policy actually exercises more than one branch
-    assert len({r.decision.action for r in batch}) >= 2
+def test_batch_equals_single_calls(engine, live, backend):
+    batch = engine(backend).score_batch(live)
+    e2 = engine(backend)
+    single = [e2.score(it) for it in live]
+    assert [b.decision.action for b in batch] == [s.decision.action for s in single]
+    assert [b.features for b in batch] == [s.features for s in single]
+    np.testing.assert_allclose([b.decision.anomaly for b in batch], [s.decision.anomaly for s in single], rtol=1e-5)
+    np.testing.assert_allclose([b.decision.risk for b in batch], [s.decision.risk for s in single], atol=1e-7)
 
 
-def test_batch_split_into_chunks_equals_one_batch(make_engine, claims):
-    items = to_items(claims)
-    whole = make_engine().score_batch(items)
-    eng = make_engine()
-    chunked = [r for i in range(0, len(items), 17) for r in eng.score_batch(items[i:i + 17])]
-    assert [r.decision.action for r in whole] == [r.decision.action for r in chunked]
+def test_chunked_batches_equal_one_batch(engine, live):
+    whole = engine().score_batch(live)
+    e2 = engine()
+    chunked = [r for i in range(0, len(live), 7) for r in e2.score_batch(live[i:i + 7])]
+    assert [a.decision.action for a in whole] == [b.decision.action for b in chunked]
+    assert [a.features for a in whole] == [b.features for b in chunked]
 
 
-def test_duplicate_flagged_on_second_identical_claim(make_engine, claims):
-    eng = make_engine(anomaly_threshold=float("inf"))
-    item = to_items(claims.iloc[[0]])[0]
-    first, second = eng.score(item), eng.score(item)
-    assert "duplicate" not in first.decision.hard_errors
-    assert "duplicate" in second.decision.hard_errors
-    assert second.decision.action != PAY
-    assert any(r["rule"] == "duplicate" for r in second.reasons["rules"])
+def test_numpy_and_torch_backends_agree(engine, live):
+    n = engine("numpy").score_batch(live)
+    t = engine("cpu").score_batch(live)
+    assert [a.decision.action for a in n] == [b.decision.action for b in t]
+    np.testing.assert_allclose([a.decision.anomaly for a in n], [b.decision.anomaly for b in t], atol=1e-4)
 
 
-def test_duplicate_within_one_batch(make_engine, claims):
-    item = to_items(claims.iloc[[3]])[0]
-    out = make_engine(anomaly_threshold=float("inf")).score_batch([item, item, item])
-    assert ["duplicate" in r.decision.hard_errors for r in out] == [False, True, True]
+def test_score_batch_empty(engine):
+    assert engine().score_batch([]) == []
 
 
-def test_duplicate_depends_on_pseudonymised_keys(make_engine, claims):
-    eng = make_engine(anomaly_threshold=float("inf"))
-    it = to_items(claims.iloc[[0]])[0]
-    other = ClaimInput(it.claim, it.bene, "OTHER-PROVIDER", it.bene_key, it.attending_key)
-    eng.score(it)
-    assert "duplicate" not in eng.score(other).decision.hard_errors
+# ------------------------------------------------------------------------------ state
+def test_bootstrap_counts_and_matches_running_the_history(aml, engine):
+    eng = engine(bootstrap=False)
+    hist = aml.tx[aml.split != "test"]
+    assert eng.bootstrap(hist) == len(hist)
+    accounts = set(hist["sender"]) | set(hist["receiver"])
+    assert set(eng.fe.ids) == accounts
 
 
-def test_hard_errors_match_rules(make_engine, claims):
-    out = make_engine(anomaly_threshold=float("inf"), provider_threshold=float("inf")).score_batch(to_items(claims))
-    for r, res in zip(claims.to_dict("records"), out):
-        assert [e for e in res.decision.hard_errors if e != "duplicate"] == hard_errors(r, r)
-        assert res.decision.action == (PAY if not res.decision.hard_errors else RETURN)
+def test_replay_rebuilds_state_without_scoring(aml, engine, live):
+    k = 40
+    uninterrupted = engine()
+    uninterrupted.score_batch(live[:k])
+    nxt_a = uninterrupted.score_batch(live[k:])
+    restarted = engine()
+    restarted.replay(live[:k])
+    assert restarted.watch == {}                                  # replay never touches the watchlist
+    nxt_b = restarted.score_batch(live[k:])
+    assert [a.features for a in nxt_a] == [b.features for b in nxt_b]
+    assert [a.decision.action for a in nxt_a] == [b.decision.action for b in nxt_b]
 
 
-def test_reasons_present_for_every_non_pay_decision(make_engine, claims):
-    out = make_engine(provider_threshold=0.0, min_provider_claims=3).score_batch(to_items(claims))
-    actions = {r.decision.action for r in out}
-    assert {PAY, RETURN, HOLD} <= actions
-    for res in out:
-        d = res.decision
-        if d.action == PAY:
-            assert res.reasons == {}
+def test_without_history_a_known_customer_looks_new(aml, engine, live):
+    from conftest import CUSTOMER_1
+
+    cold = engine(bootstrap=False).score_batch(live)
+    warm = engine().score_batch(live)
+    i = next(j for j, it in enumerate(live) if it.sender_key == ":".join(CUSTOMER_1))
+    assert cold[i].features["s_is_new"] == 1 and warm[i].features["s_is_new"] == 0
+
+
+# ------------------------------------------------------------------------------ reasons
+def test_reasons_follow_the_decision(aml, engine, live):
+    pol = policy_for(aml.models_dir)
+    res = engine().score_batch(live)
+    for r in res:
+        d = r.decision
+        if d.action == ALLOW:
+            assert r.reasons == {}
             continue
-        assert "rules" in res.reasons
-        assert res.reasons["rules"] or res.reasons.get("claim"), "non-PAY decision with no claim-level reason"
-        if d.anomaly_flag:
-            claim = res.reasons["claim"]
-            assert 1 <= len(claim) <= 3
-            assert all(c["feature"] in CLAIM_FEATURES for c in claim)
-            assert all(c["share_of_anomaly"] >= 0.10 for c in claim[1:])      # min_share; top one always kept
-            shares = [c["share_of_anomaly"] for c in claim]
-            assert shares == sorted(shares, reverse=True)
-        else:
-            assert "claim" not in res.reasons
-        assert [r["rule"] for r in res.reasons["rules"]] == d.hard_errors
-        if d.action == HOLD:
-            assert "provider" in res.reasons
-            assert all(p["contribution"] > 0 for p in res.reasons["provider"])
-        if not d.provider_ready:
-            assert "provider" not in res.reasons
+        assert [x["rule"] for x in r.reasons["rules"]] == d.rules
+        assert ("customer" in r.reasons) == d.anomaly_flag
+        assert ("drivers" in r.reasons) == (d.risk >= pol.warn_threshold)
+        if "customer" in r.reasons:
+            assert 1 <= len(r.reasons["customer"]) <= 3
+            assert all(c["feature"] in ANOMALY_FEATURES + ["hour"] for c in r.reasons["customer"])
+        for x in r.reasons.get("drivers", []):
+            assert x["contribution"] > 0 and (x["feature"] in FEATURES or x["feature"] == "hour")
+        # every non-ALLOW decision carries at least one kind of reason (HOLD implies risk >= warn -> drivers)
+        assert r.reasons["rules"] or "customer" in r.reasons or "drivers" in r.reasons
 
 
-def test_explain_all_gives_reasons_for_pay(make_engine, claims):
-    out = make_engine(anomaly_threshold=float("inf")).score_batch(to_items(claims), explain_all=True)
-    pays = [r for r in out if r.decision.action == PAY]
-    assert pays and all("rules" in r.reasons for r in pays)
+def test_explain_all(engine, live):
+    res = engine().score_batch(live, explain_all=True)
+    assert all("rules" in r.reasons for r in res)
 
 
-def test_provider_not_ready_below_min_claims(make_engine, claims):
-    eng = make_engine(anomaly_threshold=0.0, provider_threshold=0.0, min_provider_claims=4)
-    prv = claims["Provider"].iloc[0]
-    out = eng.score_batch(to_items(claims[claims["Provider"] == prv].iloc[:6]))
-    assert [r.decision.provider_ready for r in out] == [False, False, False, True, True, True]
-    assert [r.decision.action for r in out] == [RETURN] * 3 + [HOLD] * 3
+def test_rule_payment_is_at_least_warned(aml, engine, live):
+    from conftest import CUSTOMER_1
+
+    res = engine().score_batch(live)
+    i = next(j for j, it in enumerate(live) if it.sender_key == ":".join(CUSTOMER_1) and it.amount_usd == 5000.0)
+    assert res[i].decision.rules == ["big_new_payee"] and res[i].decision.action in (WARN, HOLD)
+    assert res[i].reasons["rules"][0]["rule"] == "big_new_payee"
 
 
-def test_provider_snapshot_sorted_and_respects_min_claims(make_engine, claims):
-    eng = make_engine(min_provider_claims=30)
-    eng.score_batch(to_items(claims))
-    counts = claims["Provider"].value_counts()
-    snap = eng.provider_snapshot()
-    assert {s["provider"] for s in snap} == set(counts[counts >= 30].index)
-    assert all(s["claims"] == counts[s["provider"]] for s in snap)
-    risks = [s["risk"] for s in snap]
-    assert risks == sorted(risks, reverse=True)
-    assert all(0 <= r <= 1 for r in risks)
-    # same numbers as scoring the provider state directly
-    for s in snap:
-        f = eng.providers[s["provider"]].features()
-        expected = eng.provider.predict(np.array([[f[c] for c in PROVIDER_FEATURES]], dtype=np.float32))[0]
-        assert s["risk"] == pytest.approx(expected)
+# ------------------------------------------------------------------------------ watchlist
+def test_watchlist(engine, live):
+    eng = engine()
+    res = eng.score_batch(live)
+    by = {}
+    for it, r in zip(live, res):
+        w = by.setdefault(it.receiver_key, [])
+        w.append(r.decision)
+    wl = eng.watchlist(top=1000, min_payments=1)
+    # only receivers with real risk (some inbound payment at or above the warn threshold) are listed
+    risky = {k for k, ds in by.items() if max(d.risk for d in ds) >= eng.policy.warn_threshold}
+    assert {w["account"] for w in wl} == risky
+    for w in wl:
+        ds = by[w["account"]]
+        assert w["payments"] == len(ds)
+        assert w["mean_risk"] == pytest.approx(np.mean([d.risk for d in ds]))
+        assert w["max_risk"] == pytest.approx(max(d.risk for d in ds))
+        assert w["flagged"] == sum(d.action != ALLOW for d in ds)
+    keys = [(-w["mean_risk"], -w["payments"]) for w in wl]
+    assert keys == sorted(keys)
+    assert all(w["payments"] >= 2 for w in eng.watchlist(top=1000))
+    assert len(eng.watchlist(top=3, min_payments=1)) == min(3, len(risky))
 
 
-def test_provider_snapshot_empty(make_engine, claims):
-    eng = make_engine(min_provider_claims=10_000)
-    assert eng.provider_snapshot() == []
-    eng.score_batch(to_items(claims.iloc[:5]))
-    assert eng.provider_snapshot() == []
+def test_live_mule_is_on_the_watchlist(engine, live):
+    from conftest import LIVE_MULE
+
+    eng = engine()
+    eng.score_batch(live)
+    wl = {w["account"]: w for w in eng.watchlist(top=1000)}
+    assert wl[":".join(LIVE_MULE)]["payments"] == 5
 
 
-def test_engine_rejects_scaler_with_wrong_feature_order(tmp_path, tiny_models_dir, scorers, ctx):
+# ------------------------------------------------------------------------------ construction
+def test_engine_rejects_mismatched_models(aml, tmp_path, models):
     import shutil
 
-    a, b = Artifacts(tiny_models_dir), Artifacts(tmp_path)
+    a, b = Artifacts(aml.models_dir), Artifacts(tmp_path)
     shutil.copy(a.ae_numpy, b.ae_numpy)
     s = Standardizer.load(a.scaler)
     Standardizer(list(reversed(s.features)), s.mean[::-1], s.std[::-1]).save(b.scaler)
-    anomaly = load_anomaly_scorer(tmp_path, backend="numpy")
-    with pytest.raises(ValueError, match="feature"):
-        Engine(ctx, anomaly, scorers["provider"], Policy(1, 1))
+    from scamshield.inference import load_anomaly_scorer
+
+    with pytest.raises(ValueError, match="ANOMALY_FEATURES"):
+        Engine(aml.ctx, load_anomaly_scorer(tmp_path, "numpy"), models["numpy"][1], Policy(1, 0.5, 0.9))
+
+    class WrongRisk:
+        features = list(reversed(FEATURES))
+
+    with pytest.raises(ValueError, match="FEATURES"):
+        Engine(aml.ctx, models["numpy"][0], WrongRisk(), Policy(1, 0.5, 0.9))
 
 
-def test_from_artifacts(tiny_models_dir, tmp_path, scorers, claims):
-    policy = tmp_path / "policy.json"
-    policy.write_text(json.dumps({"anomaly_threshold": None, "provider_threshold": 0.9,
-                                  "min_provider_claims": None}))
-    eng = Engine.from_artifacts(tiny_models_dir, policy, scorers["numpy"], scorers["provider"])
-    assert eng.policy == Policy(0.5, 0.9, 10)    # learned anomaly + min claims, manual provider threshold
-    assert eng.ctx == FeatureContext.from_json(Artifacts(tiny_models_dir).feature_context.read_text())
-    assert len(eng.score_batch(to_items(claims.iloc[:10]))) == 10
+def test_from_artifacts(aml, fresh_models_dir, tmp_path, models):
+    pol = tmp_path / "policy.json"
+    pol.write_text(json.dumps({"anomaly_threshold": None, "warn_threshold": None, "hold_threshold": 0.99}))
+    a, r = models["numpy"]
+    eng = Engine.from_artifacts(fresh_models_dir, pol, a, r)
+    learned = json.loads((fresh_models_dir / "thresholds.json").read_text())
+    assert eng.policy == Policy(learned["anomaly_threshold"], learned["warn_threshold"], 0.99)
+    assert eng.ctx == aml.ctx
+    (fresh_models_dir / "thresholds.json").unlink()
+    pol.write_text(json.dumps({"anomaly_threshold": 3, "warn_threshold": 0.4, "hold_threshold": 0.9}))
+    assert Engine.from_artifacts(fresh_models_dir, pol, a, r).policy == Policy(3.0, 0.4, 0.9)

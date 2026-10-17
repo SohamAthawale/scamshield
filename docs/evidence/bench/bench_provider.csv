@@ -1,6 +1,0 @@
-model,device,batch,iterations,p50_us,p99_us,providers_per_sec
-provider_xgboost,cpu,1,5000,85.1,211.5,11751.0
-provider_xgboost,cpu,32,3000,222.0,358.6,144146.0
-provider_xgboost,cpu,512,500,1729.8,2066.9,295992.0
-provider_xgboost,cpu,4096,100,12928.9,13753.1,316809.0
-provider_xgboost_shap,cpu,1,500,633.7,916.5,

@@ -1,7 +1,8 @@
 {
- "anomaly_threshold": 2.957554340362549,
- "provider_threshold": 0.56,
- "min_provider_claims": 10,
- "hold_cap": 0.02,
- "min_hold_precision_val": 0.7
+ "anomaly_threshold": 0.9007520822882663,
+ "warn_threshold": 0.1281326860189438,
+ "hold_threshold": 0.7586358785629272,
+ "hold_min_precision_val": 0.6,
+ "hold_cap": 0.002,
+ "warn_budget": 0.0125
 }
