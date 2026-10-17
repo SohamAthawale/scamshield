@@ -43,17 +43,20 @@ HISTORY_COLUMNS = ["ts", "from_bank", "sender", "to_bank", "receiver", "amount_p
 
 # ---------------------------------------------------------------------------------------- live metrics
 class Metrics:
-    def __init__(self, window: int = 5000):
+    def __init__(self, window: int = 5000, nnpa_min_batch: int = 0):
         self.recent: collections.deque = collections.deque(maxlen=window)  # (t, latency_ms, model_ms)
         self.counts = collections.Counter()
         self.amounts = collections.Counter()
         self.batch_sizes: collections.deque = collections.deque(maxlen=500)
+        self.on_nnpa = 0  # payments whose customer-anomaly score actually ran on the Telum II NNPA
+        self.nnpa_min_batch = nnpa_min_batch
         self.started = time.time()
 
-    def add(self, latency_ms: float, model_ms: float, action: str, amount_usd: float) -> None:
+    def add(self, latency_ms: float, model_ms: float, action: str, amount_usd: float, on_nnpa: bool = False) -> None:
         self.recent.append((time.time(), latency_ms, model_ms))
         self.counts[action] += 1
         self.amounts[action] += amount_usd
+        self.on_nnpa += bool(on_nnpa)
 
     def snapshot(self) -> dict[str, Any]:
         now = time.time()
@@ -72,6 +75,10 @@ class Metrics:
             "usd_warned": round(self.amounts[WARN], 2),
             "share_scored": 1.0 if total else 0.0,
             "avg_batch_size": round(float(np.mean(self.batch_sizes)), 1) if self.batch_sizes else 0.0,
+            "max_batch_size": int(max(self.batch_sizes)) if self.batch_sizes else 0,
+            "payments_on_nnpa": self.on_nnpa,
+            "nnpa_share": round(self.on_nnpa / total, 4) if total else 0.0,
+            "nnpa_min_batch": self.nnpa_min_batch,
             "uptime_s": round(now - self.started),
         }
 
@@ -118,7 +125,7 @@ class Service:
         self.engine = Engine.from_artifacts(s.models_dir, s.policy_file, self.anomaly, self.risk)
         self.history_payments = self._bootstrap()
         self.restored_payments = self._restore_state()
-        self.metrics = Metrics()
+        self.metrics = Metrics(nnpa_min_batch=s.nnpa_min_batch if self.anomaly.name == "torch_nnpa" else 0)
         self.hub = Hub()
         self.queue: asyncio.Queue | None = None
         self.inflight: set[str] = set()
@@ -209,7 +216,8 @@ class Service:
             for (p, fut, t0), out in zip(batch, outs):
                 out["latency_ms"] = round((time.perf_counter() - t0) * 1000.0, 3)
                 out["batch_size"] = len(batch)
-                self.metrics.add(out["latency_ms"], out["model_ms"], out["action"], out["_usd"])
+                self.metrics.add(out["latency_ms"], out["model_ms"], out["action"], out["_usd"],
+                                 out["backend"] == "torch_nnpa")
                 self.hub.publish("payment", {
                     "payment_token": out["payment_token"], "sender_token": out["_sender"],
                     "receiver_token": out["_receiver"], "amount_usd": round(out["_usd"], 2),

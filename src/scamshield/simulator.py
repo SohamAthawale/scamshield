@@ -100,7 +100,7 @@ async def run(url: str, token: str, payments: list[dict], rate: float, concurren
                     break
         history[f"{p['from_bank']}:{p['from_acct']}"].append(p["amount_paid"])
 
-    stats, injected, latencies = collections.Counter(), [], []
+    stats, injected, latencies, backends = collections.Counter(), [], [], collections.Counter()
     sem = asyncio.Semaphore(concurrency)
     t_start = time.perf_counter()
     limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
@@ -121,6 +121,7 @@ async def run(url: str, token: str, payments: list[dict], rate: float, concurren
                 d = r.json()
                 stats[d["action"]] += 1
                 latencies.append((rt, d["latency_ms"], d["batch_size"]))
+                backends[d.get("backend", "?")] += 1
                 if kind:
                     injected.append({"payment_id": p["payment_id"], "kind": kind, "action": d["action"],
                                      "format": p["payment_format"], "risk": d["risk"],
@@ -150,6 +151,8 @@ async def run(url: str, token: str, payments: list[dict], rate: float, concurren
         "client_latency_ms": {"p50": round(lat[len(lat) // 2], 2), "p99": round(lat[max(int(len(lat) * 0.99) - 1, 0)], 2)},
         "server_latency_ms": {"p50": round(srv[len(srv) // 2], 2), "p99": round(srv[max(int(len(srv) * 0.99) - 1, 0)], 2)},
         "avg_batch": round(sum(x[2] for x in latencies) / max(len(latencies), 1), 1),
+        "max_batch": max((x[2] for x in latencies), default=0),
+        "anomaly_backend": dict(backends),
         "injected": by_kind,
     }
     out_dir.mkdir(parents=True, exist_ok=True)

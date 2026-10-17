@@ -50,7 +50,7 @@ async function start() {
   $("role-badge").textContent = `${session.user} · ${session.role}`;
   fetch("/health").then((r) => r.json()).then((h) => {
     const b = $("backend-badge");
-    b.textContent = h.anomaly_backend === "torch_nnpa" ? "Telum II NNPA" : h.anomaly_backend;
+    b.textContent = h.anomaly_backend === "torch_nnpa" ? "Telum II NNPA ready" : h.anomaly_backend;
     b.title = `anomaly model: ${h.anomaly_backend}, risk model: ${h.risk_backend}, history: ${h.history_payments} payments`;
     if (h.anomaly_backend === "torch_nnpa") b.classList.add("nnpa");
   });
@@ -77,6 +77,11 @@ function renderMetrics(m) {
   const d = m.decisions;
   $("k-mix").textContent = `${(d.ALLOW || 0).toLocaleString()} · ${(d.WARN || 0).toLocaleString()} · ${(d.HOLD || 0).toLocaleString()}`;
   $("k-held").textContent = money(m.usd_held);
+  // the accelerator only takes calls of nnpa_min_batch or more, so say how many payments really used it
+  $("k-nnpa").textContent = m.nnpa_min_batch ? `${(100 * (m.nnpa_share || 0)).toFixed(1)}%` : "off";
+  $("k-nnpa-hint").textContent = m.nnpa_min_batch
+    ? `${(m.payments_on_nnpa || 0).toLocaleString()} payments; calls of ${m.nnpa_min_batch.toLocaleString()}+ (largest batch ${m.max_batch_size || 0})`
+    : "CPU only";
   if (chart) {
     chart.data.labels.push(new Date().toLocaleTimeString());
     chart.data.datasets[0].data.push(m.payments_per_sec);

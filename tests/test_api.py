@@ -155,6 +155,10 @@ def test_concurrent_posts_are_batched(api_env):
         assert len({r.json()["payment_token"] for r in rs}) == 50
         m = c.get("/metrics", headers=login(c, "analyst", api_env)).json()
         assert m["payments_total"] == 50 and m["avg_batch_size"] > 1
+        assert m["max_batch_size"] == max(r.json()["batch_size"] for r in rs)
+        # payments_on_nnpa counts only payments the accelerator really scored (never on a CPU-only test machine)
+        on_nnpa = sum(r.json()["backend"] == "torch_nnpa" for r in rs)
+        assert m["payments_on_nnpa"] == on_nnpa and m["nnpa_share"] == round(on_nnpa / 50, 4)
 
 
 def test_backdated_payment_does_not_fail_the_batch(client, api_env):
@@ -474,3 +478,15 @@ def test_restart_without_replay_would_differ(api_env):
         assert c2.get("/health").json()["accounts_tracked"] == before
     hist = api_env.aml.tx[api_env.aml.split != "test"]
     assert before > len(set(hist["sender"]) | set(hist["receiver"]))
+
+
+def test_metrics_count_payments_scored_on_nnpa():
+    from scamshield.api.main import Metrics
+
+    m = Metrics(nnpa_min_batch=1024)
+    m.add(1.0, 0.1, "ALLOW", 10.0)
+    for _ in range(3):
+        m.add(1.0, 0.1, "WARN", 10.0, on_nnpa=True)
+    snap = m.snapshot()
+    assert snap["payments_on_nnpa"] == 3 and snap["nnpa_share"] == 0.75 and snap["nnpa_min_batch"] == 1024
+    assert Metrics().snapshot()["nnpa_share"] == 0.0 and Metrics().snapshot()["nnpa_min_batch"] == 0

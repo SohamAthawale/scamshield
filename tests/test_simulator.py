@@ -126,6 +126,7 @@ def test_run_replays_and_reports_injections(api_env, tmp_path, monkeypatch, aml)
     n_inj = sum(v["injected"] for v in inj.values())
     assert summary["sent"] == len(payments) + n_inj and n_inj > 0
     assert sum(summary["outcomes"].values()) == summary["sent"]
+    assert sum(summary["anomaly_backend"].values()) == summary["sent"] and summary["max_batch"] >= 1
     assert not any(k.startswith(("http_", "error:")) for k in summary["outcomes"]), summary["outcomes"]
     for k in INJECTIONS:
         assert inj[k]["warned"] + inj[k]["held"] + inj[k]["allowed"] == inj[k]["injected"]
