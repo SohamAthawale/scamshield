@@ -27,15 +27,16 @@ ScamShield checks every payment **before the money moves**, in milliseconds:
 | Payments checked | **100%**, before money moves |
 | Server latency, live at 274 payments/s with Granite running | **p50 4.4 ms**, p99 53 ms (3 vCPUs) |
 | Risk model on 862,792 unseen payments (0.11% laundering) | ROC-AUC **0.984**, PR-AUC 0.564, best F1 0.587 (85% precision, 45% recall) |
-| Payments paused | **0.11%**, of which **53%** are laundering (≈480× the base rate) |
+| Payments paused | **0.074%** (641), of which **73%** are laundering (≈660× the base rate) |
 | Laundering payments warned or paused | **82%** |
 | Laundered money paused before it moved | **$269M of $424M** |
-| Laundering schemes broken (at least one payment paused) | **150 of 174** (fan-in 16/18, fan-out 18/20, cycles 19/22, …) |
+| Value-aware hold vs a plain risk threshold | **31% fewer pauses (641 vs 936), 53% → 73% precision, same $269M paused** |
+| Laundering schemes broken (at least one payment paused) | **147 of 174** (fan-in 16/18, fan-out 17/20, cycles 19/22, …) |
 | Injected victim-to-mule payments (live replay) | **55/57 warned or paused** |
 | Telum II NNPA vs CPU (payment model) | **1.2× at 1,024 payments/call, 1.4× at 4,096**; slower below ~256 (dispatch overhead), so small batches stay on the CPU and bursts shift to the accelerator |
 | Start-up | rolling state for **514,022 accounts from 4.2M historical payments in 61 s** |
 
-Details: [docs/MODEL_CARD.md](docs/MODEL_CARD.md), [docs/ENV_REPORT.md](docs/ENV_REPORT.md), [docs/evidence/](docs/evidence/).
+Details: [docs/MODEL_CARD.md](docs/MODEL_CARD.md), [docs/evidence/value_hold/](docs/evidence/value_hold/value_hold_comparison.md) (hold policy), [docs/ENV_REPORT.md](docs/ENV_REPORT.md), [docs/evidence/](docs/evidence/).
 
 ## Architecture
 

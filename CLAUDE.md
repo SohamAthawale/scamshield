@@ -46,7 +46,7 @@ Done:
 - [x] Data: IBM AMLworld HI-Small (two mirrors, identical SHA-256), artifact days after 2022-09-10 cut, time split 1-6 / 7-8 / 9-10 Sep
 - [x] One streaming feature engine for training and serving (exact parity verified on 50k payments)
 - [x] XGBoost risk (test ROC-AUC 0.984, PR-AUC 0.564) + PyTorch customer-behaviour autoencoder on Telum II NNPA + big-new-payee rule
-- [x] Policy tuned on validation: test hold 0.11% at 53% precision, 82% of laundering warned or paused, $269M of $424M paused, 150/174 schemes broken
+- [x] Policy tuned on validation (value-aware hold: risk >= 0.852, or risk >= 0.7586 and >= $5k): test hold 0.074% at 73% precision (plain threshold: 0.11% at 53%), 82% of laundering warned or paused, $269M of $424M paused, 147/174 schemes broken (`docs/evidence/value_hold/`)
 - [x] API (micro-batching, SSE, RBAC customer/analyst/auditor/service), encrypted store, audit chain with anchor, history bootstrap (4.2M payments, 61 s)
 - [x] Granite worker (customer messages + analyst briefs), dashboard, simulator with injected victim/honest payments
 - [x] NNPA vs CPU benchmark (1.2x at 1,024, 1.4x at 4,096), notebooks 01-03 executed on LinuxONE, fairness audit

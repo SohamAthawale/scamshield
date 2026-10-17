@@ -1,6 +1,6 @@
 # Model card: ScamShield
 
-All numbers come from the training run on the IBM z17 VM (`docs/evidence/training/metrics_vm.json`), the live replays (`docs/evidence/replay/`) and the notebooks executed on the VM (`notebooks/`).
+All numbers come from the training run on the IBM z17 VM (`docs/evidence/training/metrics_vm.json`), the hold-policy evaluation on the same VM with the same models (`docs/evidence/value_hold/`), the live replays (`docs/evidence/replay/`) and the notebooks executed on the VM (`notebooks/`).
 
 ## What it is for
 
@@ -10,7 +10,7 @@ Every payment is scored before it is sent:
 |---|---|---|
 | `ALLOW` | nothing unusual | nobody needs to act |
 | `WARN` | risk ≥ warn threshold, **or** the payment is unusual for this customer, **or** it is a big first payment to a new payee | the customer, with a specific warning. **They decide.** |
-| `HOLD` | risk ≥ hold threshold | the payment waits; an analyst calls the customer back on a known number. **A human decides.** |
+| `HOLD` | risk ≥ strict hold threshold, **or** risk ≥ hold threshold and the payment is at least $5,000 | the payment waits; an analyst calls the customer back on a known number. **A human decides.** |
 
 The scores are **model estimates, not findings of fraud**. Nothing is reported, frozen or refused automatically.
 
@@ -71,18 +71,33 @@ The "trimmed" note matters. The full booster also held the 100 early-stopping pa
 ### Decisions
 
 Thresholds were tuned on **validation days only**:
-- hold = the lowest risk with ≥60% precision while holding ≤0.2% of payments;
+- hold threshold (0.7586) = the lowest risk with ≥60% precision while holding ≤0.2% of payments;
+- value-aware hold: between the hold threshold and a strict threshold the model is less sure, so only payments big enough to be worth a call-back are paused there; the rest of that band is warned. Strict threshold (0.8520) and minimum amount ($5,000, from a coarse 1-2-5 grid) were chosen on validation for ≥80% hold precision while keeping ≥95% of the laundered USD the plain threshold pauses (`training.tune_value_hold`);
 - warnings come from a budget of 1.25% of payments;
 - the anomaly threshold is the 99.9th percentile of normal validation payments.
 
 | | Validation | Test |
 |---|---|---|
-| Allow / warn / hold | 98.66% / 1.24% / 0.10% | 98.26% / 1.63% / 0.11% |
-| Hold precision | 60.0% | **53.3%** |
-| Laundering payments paused | 56.8% | **52.2%** |
+| Allow / warn / hold | 98.66% / 1.27% / 0.072% | 98.26% / 1.66% / 0.074% |
+| Payments paused | 696 | **641** |
+| Hold precision | 81.5% | **73.0%** |
+| Laundering payments paused | 54.7% | **49.0%** |
 | Laundering payments warned or paused | 81.4% | **82.0%** |
 | Laundered USD paused | $337M of $460M | **$269M of $424M** |
-| Schemes with ≥1 payment paused | 145/157 | **150/174** |
+| Schemes with ≥1 payment paused | 142/157 | **147/174** |
+
+**Value-aware hold vs the plain threshold** (risk ≥ 0.7586 alone; same models, same days; `docs/evidence/value_hold/value_hold_comparison.md`):
+
+| Test days | Plain threshold | Value-aware |
+|---|---|---|
+| Payments paused | 936 (0.108%) | **641 (0.074%)** |
+| Hold precision | 53.3% | **73.0%** |
+| Laundering payments paused | 52.2% (499) | 49.0% (468) |
+| Laundered USD paused | $269.3M | $269.2M |
+| Laundering warned or paused | 82.0% | 82.0% |
+| Schemes broken | 150/174 | 147/174 |
+
+The trade: 295 fewer call-backs. Honest customers paused fall from 437 to 173, so 6 in 10 of them get a warning instead. The cost is 31 fewer laundering payments paused and 3 schemes no longer broken (one fan-out, one random, one scatter-gather). Almost all laundered money sits in large payments, so the money paused barely moves. The validation target was 80% precision; on test it is 73%, so the target did not fully carry over. Every payment the value-aware policy stops pausing is warned instead, so "warned or paused" figures, the injected-payment totals and the fairness false-alarm rates below are the same under both policies.
 
 Schemes broken on test, by pattern:
 
@@ -91,10 +106,10 @@ Schemes broken on test, by pattern:
 | bipartite | 12/16 |
 | cycle | 19/22 |
 | fan-in | 16/18 |
-| fan-out | 18/20 |
+| fan-out | 17/20 |
 | gather-scatter | 32/37 |
-| random | 14/17 |
-| scatter-gather | 19/22 |
+| random | 13/17 |
+| scatter-gather | 18/22 |
 | stack | 20/22 |
 
 ### Customer-behaviour model
@@ -104,14 +119,14 @@ Schemes broken on test, by pattern:
 
 ### Injected payments
 
-**Live replay on the VM** (30k payments plus injections, 274 payments/s):
+**Live replay on the VM** (30k payments plus injections, 274 payments/s; run under the plain hold threshold, so some of the "paused" ones would now be warned, while the warned-or-paused totals are unchanged):
 
 | Injected payment | Warned | Paused | Allowed |
 |---|---|---|---|
 | Victim → mule account | 37 | 18 | 2 |
 | Honest, to a brand-new account | 40 | 16 | 1 |
 
-**Offline, 290 of each kind** (`docs/evidence/replay/victim_vs_honest_offline.md`): victims, honest payees with history and brand-new accounts all get the **same** mix, about 32% paused, 64% warned and 4–6% allowed.
+**Offline, 290 of each kind** (`docs/evidence/replay/victim_vs_honest_offline.md`): victims, honest payees with history and brand-new accounts all get the **same** mix, about 32% paused, 64% warned and 4–6% allowed (plain hold threshold; the allowed share is the same under the value-aware hold).
 
 ## Fairness (`notebooks/03_fairness.ipynb`)
 

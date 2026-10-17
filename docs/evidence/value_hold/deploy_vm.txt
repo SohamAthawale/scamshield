@@ -1,0 +1,4 @@
+2026-10-17 11:21:40,262 INFO scamshield.api ready: anomaly=torch_nnpa risk=xgboost policy=Policy(anomaly_threshold=0.9007520822882663, warn_threshold=0.1281326860189438, hold_threshold=0.7586358785629272, hold_strict_threshold=0.8520116209983826, hold_min_usd=5000.0)
+{"status":"ok","anomaly_backend":"torch_nnpa","risk_backend":"xgboost","history_payments":4214445,"accounts_tracked":514168}
+scamshield-granite-1 Up 4 minutes
+scamshield-api-1 Up 6 minutes (healthy)
